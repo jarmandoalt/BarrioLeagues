@@ -10,8 +10,15 @@ const FloatingNotification = ({ notification }) => {
 
   if (!visible) return null
 
-  return <div className={`floating-notification ${notification.type}`} role={notification.type === 'error' ? 'alert' : 'status'}>
-    <p>{notification.message}</p>
+  return <div className={`floating-notification ${notification.type}`} role={['error', 'warning'].includes(notification.type) ? 'alert' : 'status'}>
+    <div className="floating-notification-content">
+      <p>{notification.message}</p>
+      {notification.action && <button
+        className="floating-notification-action"
+        type="button"
+        onClick={notification.action.onClick}
+      >{notification.action.label}</button>}
+    </div>
     <button type="button" aria-label="Cerrar notificación" onClick={() => setVisible(false)}><span aria-hidden="true">&times;</span></button>
   </div>
 }

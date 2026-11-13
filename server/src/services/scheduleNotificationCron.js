@@ -8,6 +8,7 @@ import {
   processScheduledNotifications,
   checkRefereeConfirmations,
 } from './scheduleNotificationService.js'
+import { advanceDueLeagueJourneys } from './leagueJourneyAutomation.js'
 
 dayjs.extend(utc)
 dayjs.extend(timezone)
@@ -21,8 +22,8 @@ let cronJob = null
  */
 export const startScheduleNotificationCron = () => {
   const testModeActive = isTestMode()
-  const schedule = testModeActive ? '* * * * *' : '0 8 * * *'
-  const description = testModeActive ? 'cada 1 minuto (TEST_MODE activado)' : 'a las 8:00 AM (Producción)'
+  const schedule = '* * * * *'
+  const description = testModeActive ? 'cada minuto (TEST_MODE activado)' : 'cada minuto para respetar el horario configurado'
 
   console.log(`[Schedule Cron] Iniciando servicio de entrega de horarios... (ejecutará ${description})`)
 
@@ -36,6 +37,13 @@ export const startScheduleNotificationCron = () => {
       console.log(`\n[Schedule Cron] [${dayjs().format('YYYY-MM-DD HH:mm:ss')}] Ejecutando ciclo de entrega de horarios...`)
       const startTime = Date.now()
 
+      const advancedLeagues = await advanceDueLeagueJourneys()
+      for (const { league, pendingMatches } of advancedLeagues) {
+        console.log(
+          `[Schedule Cron] ${league.nombre} avanzó automáticamente a la jornada ${league.jornada}. Partidos anteriores sin marcador conservados como pendientes: ${pendingMatches}.`,
+        )
+      }
+
       const summary = await processScheduledNotifications()
 
       const duration = Date.now() - startTime
@@ -48,17 +56,6 @@ export const startScheduleNotificationCron = () => {
       console.error('[Schedule Cron] Error crítico durante la ejecución del cron:', error)
     }
   })
-
-  // En producción, además programar una revisión horaria para timeouts de confirmación de árbitros
-  if (!testModeActive) {
-    cron.schedule('0 * * * *', async () => {
-      try {
-        await checkRefereeConfirmations()
-      } catch (err) {
-        console.error('[Schedule Cron] Error en chequeo horario de confirmaciones:', err)
-      }
-    })
-  }
 
   return cronJob
 }
@@ -81,7 +78,7 @@ export const getScheduleNotificationCronStatus = () => {
   return {
     isRunning: cronJob !== null,
     testMode: isTestMode(),
-    schedule: isTestMode() ? 'cada 1 minuto (* * * * *)' : 'a las 8:00 AM (0 8 * * *)',
+    schedule: '* * * * *',
     timeFactor: getTimeFactor(),
   }
 }

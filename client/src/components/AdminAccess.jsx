@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AdminAuthContext } from './AdminAuthContext'
 import FloatingNotifications from './FloatingNotifications'
+import LeagueSetupWizard from './LeagueSetupWizard'
 import { changeLeagueAdminPassword, getAdminSession, loginAdmin, loginLeagueAdmin, logoutAdmin } from '../services/leagueApi'
 import '../index.css'
 
@@ -33,6 +34,8 @@ const PasswordField = ({ value, onChange, disabled = false, autoComplete, minLen
 
 const AdminAccess = ({ children }) => {
   const { slug } = useParams()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(true)
   const [configured, setConfigured] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
@@ -41,6 +44,7 @@ const AdminAccess = ({ children }) => {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [mustChangePassword, setMustChangePassword] = useState(false)
+  const [mustConfigureLeague, setMustConfigureLeague] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -57,6 +61,7 @@ const AdminAccess = ({ children }) => {
         setConfigured(session.configured || Boolean(slug))
         setAuthenticated(isAuthenticated)
         setMustChangePassword(isAuthenticated && session.role === 'league-admin' && session.mustChangePassword)
+        setMustConfigureLeague(isAuthenticated && session.role === 'league-admin' && session.mustConfigureLeague)
       })
       .catch((requestError) => {
         if (active) setError(requestError.response?.data?.message || 'No se pudo contactar al servidor.')
@@ -74,10 +79,11 @@ const AdminAccess = ({ children }) => {
     setError('')
     try {
       const session = slug
-        ? await loginLeagueAdmin(slug, username, password)
-        : await loginAdmin(username, password)
+        ? await loginLeagueAdmin(slug, username.trim(), password)
+        : await loginAdmin(username.trim(), password)
       setPassword('')
       setMustChangePassword(Boolean(session.mustChangePassword))
+      setMustConfigureLeague(Boolean(session.mustConfigureLeague))
       setAuthenticated(true)
     } catch (requestError) {
       setError(requestError.response?.data?.message || 'No se pudo iniciar sesión.')
@@ -100,8 +106,9 @@ const AdminAccess = ({ children }) => {
 
     setBusy(true)
     try {
-      await changeLeagueAdminPassword(slug, newPassword)
+      const result = await changeLeagueAdminPassword(slug, newPassword)
       setMustChangePassword(false)
+      setMustConfigureLeague(Boolean(result.mustConfigureLeague))
       setNewPassword('')
       setConfirmPassword('')
       setNotice('Contraseña actualizada. Ya puedes administrar tu liga.')
@@ -137,16 +144,26 @@ const AdminAccess = ({ children }) => {
     </section></main>
   }
 
+  if (mustConfigureLeague && authenticated) {
+    if (slug && !location.pathname.endsWith('/admin/configurar-liga')) {
+      return <Navigate to={`/${slug}/admin/configurar-liga`} replace />
+    }
+    return <LeagueSetupWizard onComplete={() => {
+      setMustConfigureLeague(false)
+      navigate(`/${slug}/admin`, { replace: true })
+    }} />
+  }
+
   if (!authenticated) {
     return <main className="admin-access-shell">
       <FloatingNotifications notifications={[
-        error && { id: 'access-error', type: 'error', message: error },
         notice && { id: 'access-notice', type: 'success', message: notice },
+        error && { id: 'access-error', type: 'error', message: error },
+        !configured && { id: 'access-unconfigured', type: 'warning', message: 'El acceso todavía no está configurado en el servidor.' },
       ]} />
       <section className="admin-access-panel">
         <p className="admin-eyebrow">{slug ? `Administración · /${slug}` : 'Barrio Leagues'}</p>
         <h1>{slug ? 'Acceso de liga' : 'Acceso administrativo'}</h1>
-        {!configured && <p className="admin-access-notice">El acceso todavía no está configurado en el servidor.</p>}
         <form className="admin-access-form" onSubmit={handleLogin}>
           <label>Usuario<input autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} readOnly={Boolean(slug)} disabled={!configured || busy} /></label>
           <label>Contraseña<PasswordField autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={!configured || busy} /></label>

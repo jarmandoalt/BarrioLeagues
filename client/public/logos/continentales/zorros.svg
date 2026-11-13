@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <path fill="#b83c2a" d="M64 4 116 23v37c0 31-21 52-52 64C33 112 12 91 12 60V23z"/>
+  <path fill="none" stroke="#152a46" stroke-width="5" d="M64 12 108 28v32c0 26-17 44-44 56C37 104 20 86 20 60V28z"/>
+  <text x="64" y="74" fill="#fff" font-family="Arial,sans-serif" font-size="34" font-weight="700" text-anchor="middle">ZO</text>
+</svg>

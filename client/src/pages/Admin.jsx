@@ -46,7 +46,17 @@ const Admin = () => {
   }
 
   useEffect(() => {
-    loadLeagues()
+    let active = true
+    getLeagues()
+      .then((loadedLeagues) => {
+        if (active) setLeagues(loadedLeagues)
+      })
+      .catch((error) => {
+        if (active) {
+          setStatus({ type: 'error', message: error.response?.data?.message || 'No se pudieron cargar las ligas.' })
+        }
+      })
+    return () => { active = false }
   }, [])
 
   const updateLeagueField = (field, value) => setLeagueForm((current) => ({ ...current, [field]: value }))
@@ -89,6 +99,8 @@ const Admin = () => {
         jornada: Number(leagueForm.jornada),
         dueno: { nombre: leagueForm.duenoNombre.trim(), contacto: leagueForm.duenoContacto.trim(), email: leagueForm.duenoEmail.trim().toLowerCase() },
         status: leagueForm.status,
+        estado: 'configuracion',
+        wizardCompletado: false,
         branding: { logo: leagueForm.logo.trim(), colores: { primario: leagueForm.primario, secundario: leagueForm.secundario } },
       })
       await loadLeagues()

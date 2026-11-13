@@ -1,9 +1,11 @@
 import { useSelector } from 'react-redux'
-import { selectStandings } from '../features/league/leagueSlice'
+import { selectStandings, selectTeams } from '../features/league/leagueSlice'
 import LeagueHeader from '../components/LeagueHeader'
+import PublicTeamLink from '../components/PublicTeamLink'
 
 const Home = () => {
   const standings = useSelector(selectStandings)
+  const teams = useSelector(selectTeams)
   const loading = useSelector((state) => state.league.loading)
 
   if (loading) {
@@ -18,7 +20,7 @@ const Home = () => {
   const skeletonRows = Array.from({ length: 5 })
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] p-3 md:p-6">
+    <div className="standings-page min-h-screen bg-[#f8fafc] p-3 md:p-6">
       <LeagueHeader />
 
       <main className="bg-white rounded-[24px] shadow-sm border border-gray-100 overflow-hidden">
@@ -71,7 +73,9 @@ const Home = () => {
                           ? <img src={equipo.imagen} alt="" className="w-full h-full rounded-full object-cover bg-white" />
                           : equipo.nombre.slice(0, 1)}
                       </div>
-                      <span className="font-semibold text-slate-800">{equipo.nombre}</span>
+                      <PublicTeamLink team={teams.find((team) => team.nombre === equipo.nombre)} className="font-semibold text-slate-800">
+                        {equipo.nombre}
+                      </PublicTeamLink>
                     </div>
                   </td>
                   <td className="text-center font-semibold">{equipo.pj}</td>

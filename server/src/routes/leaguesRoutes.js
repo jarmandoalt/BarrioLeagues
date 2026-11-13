@@ -2,6 +2,7 @@ import { Router } from 'express'
 import mongoose from 'mongoose'
 import bcrypt from 'bcryptjs'
 import { League } from '../models/League.js'
+import { Match } from '../models/Match.js'
 
 export const leaguesRoutes = Router()
 
@@ -26,7 +27,12 @@ leaguesRoutes.post('/ligas', async (req, res) => {
     const passwordHash = await bcrypt.hash(league.slug, 12)
     const { LeagueAdminCredential } = await import('../models/LeagueAdminCredential.js')
     try {
-      await LeagueAdminCredential.create({ leagueSlug: league.slug, passwordHash, mustChangePassword: true })
+      await LeagueAdminCredential.create({
+        leagueSlug: league.slug,
+        passwordHash,
+        mustChangePassword: true,
+        mustConfigureLeague: true,
+      })
     } catch (error) {
       await League.deleteOne({ _id: league._id })
       throw error
@@ -73,6 +79,15 @@ leaguesRoutes.put('/ligas/:slug', async (req, res) => {
 
   try {
     const { slug, ...updates } = req.body
+    if (updates.formatoTorneo) {
+      const existingMatches = await Match.countDocuments({
+        liga_id: req.params.slug.toLowerCase(),
+      })
+      const currentLeague = await League.findOne({ slug: req.params.slug.toLowerCase() }).select('formatoTorneo')
+      if (existingMatches && currentLeague?.formatoTorneo !== updates.formatoTorneo) {
+        return res.status(409).json({ message: 'No se puede cambiar el formato de torneo después de generar partidos.' })
+      }
+    }
     const isSuperAdmin = req.admin?.role === 'superadmin'
     // Un admin de liga solo edita su configuración; slug, estado y branding son del admin general.
     const allowedUpdates = isSuperAdmin

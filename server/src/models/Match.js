@@ -18,6 +18,16 @@ const matchSchema = new mongoose.Schema(
     hora: { type: String, match: [/^([01]\d|2[0-3]):[0-5]\d$/, 'La hora debe tener formato HH:mm'] },
     marcadorLocal: { type: Number, default: 0, min: 0 },
     marcadorVisitante: { type: Number, default: 0, min: 0 },
+    faseTorneo: { type: String, enum: ['regular', 'cuartos', 'semifinal', 'final'], default: 'regular', index: true },
+    serieId: { type: String, trim: true },
+    torneoKey: { type: String, trim: true },
+    partidoSerie: { type: Number, enum: [1, 2] },
+    marcadorTiempoExtraLocal: { type: Number, min: 0 },
+    marcadorTiempoExtraVisitante: { type: Number, min: 0 },
+    penalesLocal: { type: Number, min: 0 },
+    penalesVisitante: { type: Number, min: 0 },
+    desempatePor: { type: String, enum: ['posicionTabla', 'tiempoExtra', 'penales'] },
+    equipoGanador_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
     estado: {
       type: String,
       enum: ['programado', 'en_curso', 'finalizado', 'suspendido'],
@@ -37,6 +47,7 @@ const matchSchema = new mongoose.Schema(
       default: 'pendiente',
     },
     arbitro_motivo_rechazo: { type: String, trim: true },
+    arbitro_motivo_respuesta: { type: String, trim: true },
     arbitro_fecha_respuesta: { type: Date },
     requiere_reasignacion: { type: Boolean, default: false },
     eventos: [{
@@ -52,6 +63,10 @@ const matchSchema = new mongoose.Schema(
 matchSchema.index({ liga_id: 1, idPartido: 1 }, { unique: true })
 matchSchema.index({ referee_notified_at: 1, referee_confirmed: 1 })
 matchSchema.index({ fecha: 1, estado: 1 })
+matchSchema.index(
+  { liga_id: 1, torneoKey: 1 },
+  { unique: true, partialFilterExpression: { torneoKey: { $type: 'string' } } },
+)
 
 matchSchema.pre('validate', function validateTeams(next) {
   if (this.equipoLocal_id && this.equipoVisitante_id && this.equipoLocal_id.equals(this.equipoVisitante_id)) {
@@ -61,4 +76,3 @@ matchSchema.pre('validate', function validateTeams(next) {
 })
 
 export const Match = mongoose.model('Match', matchSchema)
-

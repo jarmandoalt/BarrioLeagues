@@ -18,6 +18,7 @@ export const provisionLeagueAdminCredentials = async () => {
           leagueSlug: slug,
           passwordHash: await bcrypt.hash(slug, 12),
           mustChangePassword: true,
+          mustConfigureLeague: true,
         },
       },
       upsert: true,

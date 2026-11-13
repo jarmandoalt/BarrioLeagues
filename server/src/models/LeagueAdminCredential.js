@@ -5,6 +5,7 @@ const leagueAdminCredentialSchema = new mongoose.Schema(
     leagueSlug: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     passwordHash: { type: String, required: true, select: false },
     mustChangePassword: { type: Boolean, default: true },
+    mustConfigureLeague: { type: Boolean },
   },
   { timestamps: true },
 )

@@ -6,8 +6,11 @@ import { Referee } from '../models/Referee.js'
 import { Court } from '../models/Court.js'
 import { League } from '../models/League.js'
 import { findOverlappingMatch } from '../services/matchScheduling.js'
-import { updateTeamStatsFromMatch } from '../services/matchStats.js'
-import { assignFixtureSchedules, createRoundRobinFixtures } from '../services/leagueScheduleGenerator.js'
+import { recalculateTeamStats } from '../services/matchStats.js'
+import { advanceLeaguePlayoffs, validateFinalLeg } from '../services/leagueTournament.js'
+import { assignFixtureSchedules, createRoundRobinFixtures, isDoubleRoundRobinFormat } from '../services/leagueScheduleGenerator.js'
+import { requireAdminAuth } from '../services/adminAuth.js'
+import { confirmarReasignaciones, getRecursosDisponibles, inspectMoveCandidate } from '../services/calendarRescheduling.js'
 
 export const matchesRoutes = Router()
 
@@ -50,6 +53,61 @@ const populateMatch = (query) => query
   .populate('arbitro_id', 'nombre telefono')
   .populate('cancha_id', 'nombre')
 
+matchesRoutes.get('/ligas/:slug/jornadas/:jornada/recursos-disponibles', requireAdminAuth, async (req, res) => {
+  if (!requireDatabase(res)) return
+  try {
+    const excluding = String(req.query.excluir || '').split(',').filter(Boolean)
+    const resources = await getRecursosDisponibles(
+      req.params.jornada,
+      req.query.fechaHora,
+      req.query.partidoIgnorado,
+      {
+        ligaId: req.params.slug.toLowerCase(),
+        hora: req.query.hora,
+        dia: req.query.dia,
+        excluirPartidoIds: excluding,
+      },
+    )
+    return res.json(resources)
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message || 'No se pudieron consultar los recursos.' })
+  }
+})
+
+matchesRoutes.post('/ligas/:slug/partidos/:partidoId/reasignar/evaluar', async (req, res) => {
+  if (!requireDatabase(res)) return
+  try {
+    const result = await inspectMoveCandidate({
+      ligaId: req.params.slug.toLowerCase(),
+      partidoId: req.params.partidoId,
+      jornada: req.body?.jornada,
+      fechaHora: req.body?.fechaHora,
+      hora: req.body?.hora,
+      dia: req.body?.dia,
+      canchaId: req.body?.canchaId,
+      arbitroId: req.body?.arbitroId,
+      excluirPartidoIds: req.body?.excluirPartidoIds || [],
+    })
+    return res.json(result)
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message || 'No se pudo evaluar el nuevo horario.' })
+  }
+})
+
+matchesRoutes.post('/ligas/:slug/partidos/reasignar/confirmar', async (req, res) => {
+  if (!requireDatabase(res)) return
+  try {
+    const matches = await confirmarReasignaciones({
+      ligaId: req.params.slug.toLowerCase(),
+      movimientos: req.body?.movimientos,
+      operador: req.admin?.username || 'administrador',
+    })
+    return res.json({ matches })
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message || 'No se pudieron confirmar las reasignaciones.' })
+  }
+})
+
 matchesRoutes.get('/partidos', async (req, res) => {
   if (!requireDatabase(res)) return
 
@@ -68,20 +126,20 @@ matchesRoutes.post('/ligas/:slug/partidos/generar', async (req, res) => {
 
   try {
     const ligaId = req.params.slug.toLowerCase()
-    const league = await League.findOne({ slug: ligaId }).select('jornada formatoTorneo duracionPartido')
+    const league = await League.findOne({ slug: ligaId }).select('jornada formatoTorneo duracionPartido config')
     if (!league) return res.status(404).json({ message: 'Liga no encontrada' })
 
     const assign = Object.fromEntries(['arbitro', 'cancha', 'horario'].map((key) => [key, req.body?.asignar?.[key] === true]))
     const [teams, existingMatches, courts, referees] = await Promise.all([
       Team.find({ ligaId }).sort({ nombre: 1 }),
-      Match.find({ liga_id: ligaId }).select('idPartido equipoLocal_id equipoVisitante_id arbitro_id cancha_id jornada fecha estado'),
+      Match.find({ liga_id: ligaId }).select('idPartido equipoLocal_id equipoVisitante_id arbitro_id cancha_id jornada fecha estado faseTorneo'),
       Court.find({ liga_id: ligaId, estado: 'activa' }),
       Referee.find({ liga_id: ligaId, estado: 'activo' }),
     ])
     const fixtures = createRoundRobinFixtures({
       teams,
       existingMatches,
-      currentJourney: league.jornada ?? 0,
+      currentJourney: existingMatches.length === 0 ? 0 : league.jornada ?? 0,
       format: league.formatoTorneo || 'todos-vs-todos-una-vuelta',
     })
     if (fixtures.length === 0) return res.json({ count: 0, matches: [] })
@@ -93,12 +151,16 @@ matchesRoutes.post('/ligas/:slug/partidos/generar', async (req, res) => {
       referees,
       durationMinutes: league.duracionPartido || 60,
       assign,
+      startDate: league.config?.fechaInicioLiga,
+      startTime: league.config?.horaInicioLiga,
+      journeyDates: league.config?.fechasJornadas,
     })
     const usedIds = new Set(existingMatches.map((match) => match.idPartido))
     const matchDocuments = scheduledMatches.map((match) => ({
       ...match,
       idPartido: getAvailableMatchId(usedIds),
       liga_id: ligaId,
+      faseTorneo: 'regular',
       marcadorLocal: 0,
       marcadorVisitante: 0,
       eventos: [],
@@ -146,12 +208,12 @@ matchesRoutes.post('/partidos', async (req, res) => {
     const match = await Match.create({ ...req.body, liga_id: ligaId })
 
     if (match.estado === 'finalizado') {
-      const localTeam = teams.find((team) => team._id.equals(localId))
-      const visitorTeam = teams.find((team) => team._id.equals(visitaId))
-      await updateTeamStatsFromMatch(localTeam, visitorTeam, match.marcadorLocal, match.marcadorVisitante)
+      await recalculateTeamStats([localId, visitaId])
     }
 
-    return res.status(201).json(await populateMatch(Match.findById(match._id)))
+    const torneoAviso = match.estado === 'finalizado' ? await advanceLeaguePlayoffs(ligaId) : ''
+    const populatedMatch = await populateMatch(Match.findById(match._id))
+    return res.status(201).json({ ...(await populatedMatch).toObject(), ...(torneoAviso && { torneoAviso }) })
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: 'Ese ID ya está en uso en esta liga' })
@@ -181,14 +243,61 @@ matchesRoutes.put('/partidos/:id', async (req, res) => {
     const schedulingError = await getSchedulingError(req.body, ligaId, court?._id, req.params.id)
     if (schedulingError) return res.status(schedulingError.status).json({ message: schedulingError.message })
 
+    const existingMatch = await Match.findOne({ _id: req.params.id, liga_id: ligaId })
+    if (!existingMatch) return res.status(404).json({ message: 'Partido no encontrado' })
+
+    const downstreamPhases = {
+      cuartos: ['semifinal', 'final'],
+      semifinal: ['final'],
+    }[existingMatch.faseTorneo]
+    if (downstreamPhases?.length) {
+      const downstreamMatch = await Match.findOne({
+        liga_id: ligaId,
+        faseTorneo: { $in: downstreamPhases },
+      }).select('_id')
+      const resultChanged = ['marcadorLocal', 'marcadorVisitante', 'estado'].some((field) => (
+        req.body[field] !== undefined && req.body[field] !== existingMatch[field]
+      ))
+      if (downstreamMatch && resultChanged) {
+        return res.status(409).json({ message: 'No se puede cambiar este resultado después de generar la siguiente fase de liguilla.' })
+      }
+    }
+
+    if (existingMatch.faseTorneo === 'final' && existingMatch.partidoSerie === 2) {
+      const firstLeg = await Match.findOne({
+        liga_id: ligaId,
+        faseTorneo: 'final',
+        serieId: existingMatch.serieId,
+        partidoSerie: 1,
+      })
+      const tieError = validateFinalLeg({ match: existingMatch, otherLeg: firstLeg, body: req.body })
+      if (tieError) return res.status(400).json({ message: tieError })
+    }
+
+    const matchUpdate = { ...req.body, liga_id: ligaId }
+    const fieldsToClear = ['marcadorTiempoExtraLocal', 'marcadorTiempoExtraVisitante', 'penalesLocal', 'penalesVisitante']
+    const unset = Object.fromEntries(fieldsToClear
+      .filter((field) => matchUpdate[field] === undefined || matchUpdate[field] === '')
+      .map((field) => [field, 1]))
+    fieldsToClear.forEach((field) => {
+      if (unset[field]) delete matchUpdate[field]
+    })
     const match = await Match.findOneAndUpdate(
       { _id: req.params.id, liga_id: ligaId },
-      { ...req.body, liga_id: ligaId },
+      { $set: matchUpdate, ...(Object.keys(unset).length > 0 && { $unset: unset }) },
       { new: true, runValidators: true },
     )
 
     if (!match) return res.status(404).json({ message: 'Partido no encontrado' })
-    return res.json(await populateMatch(Match.findById(match._id)))
+    await recalculateTeamStats([
+      existingMatch.equipoLocal_id,
+      existingMatch.equipoVisitante_id,
+      match.equipoLocal_id,
+      match.equipoVisitante_id,
+    ])
+    const torneoAviso = match.estado === 'finalizado' ? await advanceLeaguePlayoffs(ligaId) : ''
+    const populatedMatch = await populateMatch(Match.findById(match._id))
+    return res.json({ ...(await populatedMatch).toObject(), ...(torneoAviso && { torneoAviso }) })
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: 'Ese ID ya está en uso en esta liga' })
@@ -196,5 +305,3 @@ matchesRoutes.put('/partidos/:id', async (req, res) => {
     return res.status(400).json({ message: 'No se pudo actualizar el partido', error: error.message })
   }
 })
-
-

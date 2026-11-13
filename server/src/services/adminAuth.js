@@ -73,9 +73,12 @@ export const requireAdminAuth = async (req, res, next) => {
     return res.status(403).json({ message: 'Esta cuenta no puede modificar datos hasta completar el cambio de contraseña' })
   }
 
-  const credential = await LeagueAdminCredential.findOne({ leagueSlug: session.leagueSlug }).select('mustChangePassword')
+  const credential = await LeagueAdminCredential.findOne({ leagueSlug: session.leagueSlug }).select('mustChangePassword mustConfigureLeague')
   if (!credential || credential.mustChangePassword) {
     return res.status(403).json({ message: 'Debes iniciar sesión y cambiar la contraseña antes de continuar' })
+  }
+  if (credential.mustConfigureLeague ?? credential.mustChangePassword) {
+    return res.status(403).json({ message: 'Completa la configuración inicial de la liga antes de continuar' })
   }
 
   // Este middleware es global: req.params no incluye el slug, hay que leerlo de la ruta.

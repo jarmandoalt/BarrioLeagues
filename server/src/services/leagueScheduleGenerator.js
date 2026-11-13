@@ -1,8 +1,57 @@
 const weekdays = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
-const doubleRoundRobinFormat = 'todos-vs-todos-ida-y-vuelta'
+const doubleRoundRobinFormats = new Set([
+  'todos-vs-todos-ida-y-vuelta',
+  'LIGA_IDA_VUELTA',
+  'LIGA_IDA_VUELTA_CON_LIGUILLA_8',
+])
+
+export const isDoubleRoundRobinFormat = (format) => doubleRoundRobinFormats.has(format)
 
 const getId = (value) => value?._id?.toString() || value?.toString() || ''
 const getPairKey = (localId, visitorId) => [localId, visitorId].sort().join(':')
+
+export const calcularFechasJornadas = (fechaInicioLiga, diasJuego, cambioDeJornada, totalJornadas) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaInicioLiga) || !Array.isArray(diasJuego) || diasJuego.length === 0
+    || !Number.isInteger(totalJornadas) || totalJornadas < 1) {
+    throw new Error('No se pueden calcular las fechas de jornada con la configuración indicada.')
+  }
+  const availableDays = new Set(diasJuego)
+  const firstDate = new Date(`${fechaInicioLiga}T12:00:00Z`)
+  if (Number.isNaN(firstDate.getTime())) throw new Error('La fecha de inicio de liga no es válida.')
+  const results = [{ jornada: 1, fecha: fechaInicioLiga }]
+  let previousDate = firstDate
+  const changeDay = weekdays.includes(cambioDeJornada)
+    ? cambioDeJornada
+    : cambioDeJornada === 'cada_lunes' ? 'lunes' : null
+  for (let jornada = 2; jornada <= totalJornadas; jornada += 1) {
+    const previousDay = (previousDate.getUTCDay() + 6) % 7
+    const searchStart = new Date(previousDate)
+    if (changeDay) {
+      const targetDay = weekdays.indexOf(changeDay)
+      const daysUntilChange = (targetDay - previousDay + 7) % 7 || 7
+      searchStart.setUTCDate(searchStart.getUTCDate() + daysUntilChange)
+      previousDate = searchStart
+      results.push({ jornada, fecha: searchStart.toISOString().slice(0, 10) })
+      continue
+    }
+    searchStart.setUTCDate(searchStart.getUTCDate() + 1)
+
+    let nextDate = null
+    for (let offset = 0; offset < 7; offset += 1) {
+      const candidate = new Date(searchStart)
+      candidate.setUTCDate(candidate.getUTCDate() + offset)
+      const candidateDay = weekdays[(candidate.getUTCDay() + 6) % 7]
+      if (availableDays.has(candidateDay)) {
+        nextDate = candidate
+        break
+      }
+    }
+    if (!nextDate) throw new Error('No hay días de juego disponibles para calcular el calendario.')
+    previousDate = nextDate
+    results.push({ jornada, fecha: nextDate.toISOString().slice(0, 10) })
+  }
+  return results
+}
 
 export const createRoundRobinFixtures = ({ teams, existingMatches, currentJourney, format }) => {
   if (teams.length < 2) return []
@@ -39,7 +88,7 @@ export const createRoundRobinFixtures = ({ teams, existingMatches, currentJourne
     rotation.splice(1, 0, rotation.pop())
   }
 
-  const fixtures = format === doubleRoundRobinFormat
+  const fixtures = isDoubleRoundRobinFormat(format)
     ? [...oneLegFixtures, ...oneLegFixtures.map((fixture) => ({
       jornada: fixture.jornada + roundCount,
       equipoLocal_id: fixture.equipoVisitante_id,
@@ -71,7 +120,7 @@ export const createRoundRobinFixtures = ({ teams, existingMatches, currentJourne
 
     if (occupiedTeamsByJourney.has(`${fixture.jornada}:${localId}`)
       || occupiedTeamsByJourney.has(`${fixture.jornada}:${visitorId}`)) return false
-    if (format === doubleRoundRobinFormat) {
+    if (isDoubleRoundRobinFormat(format)) {
       if (existingDirections.has(directionKey) || scheduledDirections.has(directionKey)) return false
       scheduledDirections.add(directionKey)
     } else {
@@ -82,12 +131,14 @@ export const createRoundRobinFixtures = ({ teams, existingMatches, currentJourne
   })
 }
 
-const createScheduleDate = (day, time, weekOffset, now) => {
+const createScheduleDate = (day, time, weekOffset, now, startDate) => {
   const targetDay = weekdays.indexOf(day)
   const [hours, minutes] = time.split(':').map(Number)
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const today = startDate
+    ? new Date(`${startDate}T12:00:00`)
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const currentDay = (today.getDay() + 6) % 7
-  const daysUntilSchedule = (targetDay - currentDay + 7) % 7 || 7
+  const daysUntilSchedule = (targetDay - currentDay + 7) % 7 || (startDate ? 0 : 7)
   return new Date(
     today.getFullYear(),
     today.getMonth(),
@@ -113,19 +164,40 @@ const hasCourtOrTeamConflict = (candidate, matches, durationMs) => {
 
 const getLoad = (referee, matches) => matches.filter((match) => getId(match.arbitro_id) === getId(referee)).length
 
-const pickReferee = (candidate, referees, matches, durationMs) => {
+const pickReferee = (candidate, referees, matches, durationMs, requireAvailability = false) => {
   const busyReferees = new Set(matches
     .filter((match) => candidate.fecha && overlapsInTime(candidate, match, durationMs))
     .map((match) => getId(match.arbitro_id)))
   const availableReferees = referees.filter((referee) => !busyReferees.has(getId(referee)))
-  // Si todos están ocupados a esa hora se reutiliza el de menor carga.
+  if (requireAvailability && availableReferees.length === 0) return null
   const pool = availableReferees.length > 0 ? availableReferees : referees
   return pool.reduce((best, referee) => (getLoad(referee, matches) < getLoad(best, matches) ? referee : best))
 }
 const getDayKey = (date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+const addDaysToDateString = (dateString, days) => {
+  const [year, month, day] = dateString.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day + days, 12))
+  return date.toISOString().slice(0, 10)
+}
+const getWeekdayFromDateString = (dateString) => {
+  const [year, month, day] = dateString.split('-').map(Number)
+  return weekdays[(new Date(Date.UTC(year, month - 1, day, 12)).getUTCDay() + 6) % 7]
+}
 const defaultAssignment = { arbitro: true, cancha: true, horario: true }
 
-export const assignFixtureSchedules = ({ fixtures, existingMatches, courts, referees, durationMinutes, assign = defaultAssignment, now = new Date() }) => {
+export const assignFixtureSchedules = ({
+  fixtures,
+  existingMatches,
+  courts,
+  referees,
+  durationMinutes,
+  assign = defaultAssignment,
+  now = new Date(),
+  startDate,
+  startTime,
+  journeyDates,
+  requireRefereeAvailability = false,
+}) => {
   if (fixtures.length === 0) return []
 
   const { arbitro, cancha, horario } = { ...defaultAssignment, ...assign }
@@ -173,14 +245,37 @@ export const assignFixtureSchedules = ({ fixtures, existingMatches, courts, refe
     })))
   if (scheduleTemplates.length === 0) throw new Error('Agrega horarios a las canchas activas para generar los partidos.')
 
+  const journeyDateMap = new Map((journeyDates || []).map((item) => [item.jornada, item.fecha]))
   const maxWeeks = fixtures.length + existingMatches.length + 4
   const candidateSlots = []
-  for (let weekOffset = 0; weekOffset < maxWeeks; weekOffset += 1) {
-    scheduleTemplates.forEach((schedule) => candidateSlots.push({
-      cancha_id: schedule.courtId,
-      fecha: createScheduleDate(schedule.dia, schedule.horaInicio, weekOffset, now),
-      hora: schedule.horaInicio,
-    }))
+  if (journeyDateMap.size) {
+    const journeys = [...new Set(fixtures.map((fixture) => fixture.jornada))].sort((first, second) => first - second)
+    journeys.forEach((journey) => {
+      const journeyStart = journeyDateMap.get(journey)
+      if (!journeyStart) return
+      const nextJourneyStart = journeyDateMap.get(journey + 1) || addDaysToDateString(journeyStart, 7)
+      for (let date = journeyStart; date < nextJourneyStart; date = addDaysToDateString(date, 1)) {
+        const dateWeekday = getWeekdayFromDateString(date)
+        scheduleTemplates.filter((schedule) => schedule.dia === dateWeekday).forEach((schedule) => {
+          if (date === startDate && startTime && schedule.horaInicio < startTime) return
+          candidateSlots.push({
+            jornada: journey,
+            cancha_id: schedule.courtId,
+            fecha: new Date(`${date}T${schedule.horaInicio}:00`),
+            hora: schedule.horaInicio,
+          })
+        })
+      }
+    })
+  } else {
+    for (let weekOffset = 0; weekOffset < maxWeeks; weekOffset += 1) {
+      scheduleTemplates.forEach((schedule) => {
+        const fecha = createScheduleDate(schedule.dia, schedule.horaInicio, weekOffset, now, startDate)
+        const dateKey = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, '0')}-${String(fecha.getDate()).padStart(2, '0')}`
+        if (dateKey === startDate && startTime && schedule.horaInicio < startTime) return
+        candidateSlots.push({ cancha_id: schedule.courtId, fecha, hora: schedule.horaInicio })
+      })
+    }
   }
   candidateSlots.sort((first, second) => first.fecha - second.fecha || first.hora.localeCompare(second.hora) || first.cancha_id.localeCompare(second.cancha_id))
 
@@ -194,10 +289,24 @@ export const assignFixtureSchedules = ({ fixtures, existingMatches, courts, refe
   const placeFixtures = (journeyFixtures, slots) => {
     const placed = []
     for (const fixture of journeyFixtures) {
-      const slot = slots.find((item) => !hasCourtOrTeamConflict({ ...fixture, ...item }, [...scheduledMatches, ...placed], durationMs))
+      const slot = slots.find((item) => {
+        const candidate = { ...fixture, ...item }
+        const currentMatches = [...scheduledMatches, ...placed]
+        if (hasCourtOrTeamConflict(candidate, currentMatches, durationMs)) return false
+        return !arbitro || !requireRefereeAvailability
+          || Boolean(pickReferee(candidate, activeReferees, currentMatches, durationMs, true))
+      })
       if (!slot) return null
       const candidate = { ...fixture, ...slot, estado: 'programado' }
-      if (arbitro) candidate.arbitro_id = getId(pickReferee(candidate, activeReferees, [...scheduledMatches, ...placed], durationMs))
+      if (arbitro) {
+        candidate.arbitro_id = getId(pickReferee(
+          candidate,
+          activeReferees,
+          [...scheduledMatches, ...placed],
+          durationMs,
+          requireRefereeAvailability,
+        ))
+      }
       placed.push(candidate)
     }
     return placed
@@ -207,6 +316,14 @@ export const assignFixtureSchedules = ({ fixtures, existingMatches, courts, refe
   let nextDayIndex = 0
   journeys.forEach((journey) => {
     const journeyFixtures = fixtures.filter((fixture) => fixture.jornada === journey)
+    if (journeyDateMap.has(journey)) {
+      const journeySlots = candidateSlots.filter((slot) => slot.jornada === journey)
+      const placed = placeFixtures(journeyFixtures, journeySlots)
+      if (!placed) throw new Error(`No hay horarios disponibles para acomodar la jornada ${journey} en su fecha programada.`)
+      generatedMatches.push(...placed.map(finalize))
+      scheduledMatches.push(...placed)
+      return
+    }
     let placed = null
     let usedDayIndex = nextDayIndex
     // Cada jornada se juega completa en un mismo día; si no cabe, se reparte en los días siguientes.

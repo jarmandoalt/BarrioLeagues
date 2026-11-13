@@ -13,7 +13,6 @@ import {
   OFFICIAL_SCHEDULE_TABLE,
   calculateScheduleNoticeTimes,
   notifyReferee,
-  notifyCaptains,
   checkRefereeConfirmations,
   confirmRefereeAssignment,
 } from '../services/scheduleNotificationService.js'
@@ -35,8 +34,8 @@ const router = express.Router()
  *   jornada: 1,
  *   leagueId: "barrio_test",
  *   matchId: "6acf1a44...", // o idPartido "100001"
- *   simulateTimeout: true,  // opcional: ajusta referee_notified_at a hace 9 mins para probar timeout de 8 mins inmediatamente
- *   minutesAgo: 9           // opcional: minutos atrás para simular tiempo transcurrido
+ *   simulateTimeout: true,  // opcional: ajusta referee_notified_at para probar el plazo de 6 minutos
+ *   minutesAgo: 6           // opcional: minutos atrás para simular tiempo transcurrido
  * }
  */
 router.post('/test/simular-jornada', async (req, res) => {
@@ -116,9 +115,9 @@ router.post('/test/simular-jornada', async (req, res) => {
     const processed = []
     const allNotifications = []
 
-    // Si se solicitó simular timeout (para probar que en 8 minutos se alerta al admin)
+    // Si se solicitó simular el vencimiento del plazo de respuesta.
     const simulatedNoticeDate = simulateTimeout || minutesAgo
-      ? dayjs().subtract(minutesAgo || 9, 'minute').toDate()
+      ? dayjs().subtract(minutesAgo || 6, 'minute').toDate()
       : new Date()
 
     for (const match of matches) {
@@ -132,10 +131,6 @@ router.post('/test/simular-jornada', async (req, res) => {
       const refLog = await notifyReferee(match, { notifiedAt: simulatedNoticeDate })
       if (refLog) allNotifications.push(refLog)
 
-      // Enviar aviso a capitanes
-      const capLogs = await notifyCaptains(match, { notifiedAt: new Date() })
-      if (capLogs && capLogs.length) allNotifications.push(...capLogs)
-
       processed.push({
         matchId: match._id,
         idPartido: match.idPartido,
@@ -147,7 +142,6 @@ router.post('/test/simular-jornada', async (req, res) => {
         refereeNoticeDate: scheduleInfo.refereeNoticeDate,
         captainsNoticeDate: scheduleInfo.captainsNoticeDate,
         referee_notified_at: match.referee_notified_at,
-        captains_notified_at: match.captains_notified_at,
         referee_confirmed: match.referee_confirmed,
         status: 'notificaciones_enviadas',
       })
@@ -279,7 +273,7 @@ router.post('/test/confirmar-arbitro/match/:matchId', handleConfirmarArbitro)
 
 /**
  * POST /api/test/chequear-confirmaciones
- * Ejecuta manualmente el chequeo de confirmaciones (8 horas / 8 minutos en test mode)
+ * Ejecuta manualmente el chequeo de confirmaciones (6 horas / 6 minutos en test mode)
  */
 router.post('/test/chequear-confirmaciones', async (req, res) => {
   try {
@@ -328,14 +322,14 @@ router.get('/test/info', (req, res) => {
   res.json({
     testMode: testModeActive,
     timeFactor: testModeActive ? '1 hora = 1 minuto' : '1 hora = 1 hora (producción)',
-    refereeConfirmationTimeout: `${timeoutMs / 60000} minutos (${testModeActive ? 'en TEST_MODE' : 'en producción: 8 horas'})`,
-    cronSchedule: testModeActive ? 'cada 1 minuto (* * * * *)' : 'diario a las 8:00 AM (0 8 * * *)',
+    refereeConfirmationTimeout: `${timeoutMs / 60000} minutos (${testModeActive ? 'en TEST_MODE' : 'en producción: 6 horas'})`,
+    cronSchedule: 'cada minuto (* * * * *)',
     officialScheduleTable: OFFICIAL_SCHEDULE_TABLE,
     endpoints: {
       'POST /api/test/simular-jornada': 'Simula avisos de horario según tabla oficial (soporta matchDate, jornada, simulateTimeout)',
       'GET /api/test/logs': 'Lista todos los logs guardados en notifications_log',
       'POST /api/test/confirmar-arbitro/:id': 'Confirma asistencia de árbitro por ID de partido o árbitro',
-      'POST /api/test/chequear-confirmaciones': 'Verifica timeout de árbitros y genera alerta admin si > 8h (8min en test)',
+      'POST /api/test/chequear-confirmaciones': 'Verifica timeout de árbitros y genera alerta admin si vencen 6 horas (6 minutos en test)',
       'POST /api/test/limpiar-logs': 'Limpia la tabla notifications_log',
     },
   })

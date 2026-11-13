@@ -40,7 +40,11 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json())
+app.use(express.json({
+  verify(req, res, buffer) {
+    req.rawBody = Buffer.from(buffer)
+  },
+}))
 app.use(cookieParser())
 
 app.get('/api/health', (req, res) => {
@@ -51,6 +55,7 @@ app.use('/api', adminAuthRoutes)
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next()
   if (req.path === '/admin/login' || req.path === '/admin/logout') return next()
+  if (req.path === '/webhook/button-response') return next()
   if (/^\/ligas\/[^/]+\/arbitros\/(?:verificar-partido|[^/]+\/reporte)$/.test(req.path)) return next()
   if (/^\/test\//.test(req.path)) return next()
   if (/^\/notifications\//.test(req.path)) return next()

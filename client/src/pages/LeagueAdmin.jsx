@@ -6,6 +6,7 @@ import TeamGrid from '../components/TeamGrid'
 import EquipoDetalle from '../components/EquipoDetalle'
 import { useAdminAuth } from '../components/AdminAuthContext'
 import FloatingNotifications from '../components/FloatingNotifications'
+import CalendarRescheduler from '../components/CalendarRescheduler'
 import { advanceLeagueJornadaWithWhatsApp, createCourt, createMatch, createPlayer, createReferee, createTeam, generateLeagueMatches, getCourts, getLeagueAdminContact, getLeagueBySlug, getMatches, getPlayers, getReferees, getTeams, updateCourt, updateLeague, updateMatch, updatePlayer, updateReferee, updateTeam } from '../services/leagueApi'
 import '../index.css'
 
@@ -17,13 +18,6 @@ const initialForm = {
   colorPrimario: '#1f6feb',
   colorSecundario: '#ffffff',
   imagen: '',
-  pj: 0,
-  pg: 0,
-  pe: 0,
-  pp: 0,
-  gf: 0,
-  gc: 0,
-  racha: '',
 }
 
 const initialPlayerForm = {
@@ -45,6 +39,10 @@ const initialMatchForm = {
   equipoVisitante_id: '',
   marcadorLocal: 0,
   marcadorVisitante: 0,
+  marcadorTiempoExtraLocal: '',
+  marcadorTiempoExtraVisitante: '',
+  penalesLocal: '',
+  penalesVisitante: '',
   estado: 'programado',
   cancha_id: '',
   eventos: [],
@@ -82,7 +80,45 @@ const hasPendingAssignment = (match) => !match.fecha || !match.hora || !match.ca
 const groupMatchesByJornada = (list) => [...list.reduce((map, match) => map.set(match.jornada, [...(map.get(match.jornada) || []), match]), new Map())].sort((a, b) => a[0] - b[0])
 const getTotalJornadas = (league, teams) => {
   const rounds = teams.length % 2 === 0 ? Math.max(teams.length - 1, 0) : teams.length
-  return league?.formatoTorneo === 'todos-vs-todos-ida-y-vuelta' ? rounds * 2 : rounds
+  return ['LIGA_IDA_VUELTA', 'LIGA_IDA_VUELTA_CON_LIGUILLA_8', 'todos-vs-todos-ida-y-vuelta'].includes(league?.formatoTorneo) ? rounds * 2 : rounds
+}
+const getTournamentFormat = (format) => ({
+  'todos-vs-todos-una-vuelta': 'LIGA_UNA_VUELTA',
+  'todos-vs-todos-ida-y-vuelta': 'LIGA_IDA_VUELTA',
+}[format] || format || 'LIGA_UNA_VUELTA')
+const getMatchPhaseLabel = (phase) => ({
+  regular: 'Fase regular',
+  cuartos: 'Cuartos de final',
+  semifinal: 'Semifinal',
+  final: 'Final',
+}[phase] || 'Partido')
+const getId = (value) => value?._id || value
+const getFinalTieState = (match, form, matches) => {
+  if (!match || match.faseTorneo !== 'final' || match.partidoSerie !== 2) return { tied: false, extraTimeTied: false }
+  const firstLeg = matches.find((item) => item.faseTorneo === 'final' && item.serieId === match.serieId && item.partidoSerie === 1)
+  if (!firstLeg || firstLeg.estado !== 'finalizado') return { tied: false, extraTimeTied: false }
+
+  const totals = new Map()
+  const addScore = (game, localScore, visitorScore) => {
+    const localId = String(getId(game.equipoLocal_id))
+    const visitorId = String(getId(game.equipoVisitante_id))
+    totals.set(localId, (totals.get(localId) || 0) + Number(localScore))
+    totals.set(visitorId, (totals.get(visitorId) || 0) + Number(visitorScore))
+  }
+  addScore(firstLeg, firstLeg.marcadorLocal, firstLeg.marcadorVisitante)
+  addScore(match, form.marcadorLocal, form.marcadorVisitante)
+  const [homeTotal, awayTotal] = totals.values()
+  if (homeTotal !== awayTotal) return { tied: false, extraTimeTied: false }
+
+  const extraHome = form.marcadorTiempoExtraLocal
+  const extraAway = form.marcadorTiempoExtraVisitante
+  if (extraHome === '' || extraAway === '') return { tied: true, extraTimeTied: false }
+  const extraTotals = new Map(totals)
+  const localId = String(getId(match.equipoLocal_id))
+  const visitorId = String(getId(match.equipoVisitante_id))
+  extraTotals.set(localId, extraTotals.get(localId) + Number(extraHome))
+  extraTotals.set(visitorId, extraTotals.get(visitorId) + Number(extraAway))
+  return { tied: true, extraTimeTied: [...extraTotals.values()][0] === [...extraTotals.values()][1] }
 }
 const getJornadaOptions = (league, teams, current) => {
   const total = getTotalJornadas(league, teams)
@@ -91,7 +127,6 @@ const getJornadaOptions = (league, teams, current) => {
   return current && !options.includes(current) ? [current, ...options] : options
 }
 const formatJornada = (value) => Number(value) === 0 ? 'Pre-temporada' : `Jornada ${value}`
-const weekdayNames = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado']
 
 const LeagueAdmin = () => {
   const { logout } = useAdminAuth()
@@ -121,6 +156,7 @@ const LeagueAdmin = () => {
   const [refereeForm, setRefereeForm] = useState(initialRefereeForm)
   const [showRefereeForm, setShowRefereeForm] = useState(false)
   const [matches, setMatches] = useState([])
+  const [reschedulingMatch, setReschedulingMatch] = useState(null)
   const [activeSection, setActiveSection] = useState('equipos')
   const [editingMatch, setEditingMatch] = useState(null)
   const [editingReferee, setEditingReferee] = useState(null)
@@ -133,7 +169,7 @@ const LeagueAdmin = () => {
   const [showAdvanceConfirmation, setShowAdvanceConfirmation] = useState(false)
   const [showMessageSimulation, setShowMessageSimulation] = useState(false)
   const [simulatedMessages, setSimulatedMessages] = useState([])
-  const [settingsForm, setSettingsForm] = useState({ jornada: 1, actualizacionJornada: 'lunes', email: '', duracionPartido: 60, formatoTorneo: 'todos-vs-todos-una-vuelta', avisoPartidosDia: 'lunes', avisoPartidosHora: '09:00' })
+  const [settingsForm, setSettingsForm] = useState({ jornada: 1, actualizacionJornada: 'lunes', email: '', duracionPartido: 60, formatoTorneo: 'LIGA_UNA_VUELTA', avisoPartidosDia: 'lunes', avisoPartidosHora: '09:00' })
   const lastScheduleAlert = useRef('')
 
   useEffect(() => {
@@ -141,7 +177,7 @@ const LeagueAdmin = () => {
       try {
         const [leagueData, teamsData, refereeData, matchData, courtData, adminContact] = await Promise.all([getLeagueBySlug(slug), getTeams(slug), getReferees(slug), getMatches(slug), getCourts(slug), getLeagueAdminContact(slug)])
         setLeague(leagueData)
-        setSettingsForm({ jornada: leagueData.jornada ?? 1, actualizacionJornada: leagueData.actualizacionJornada || 'lunes', email: adminContact.email || '', duracionPartido: leagueData.duracionPartido || 60, formatoTorneo: leagueData.formatoTorneo || 'todos-vs-todos-una-vuelta', avisoPartidosDia: leagueData.avisoPartidosDia || 'lunes', avisoPartidosHora: leagueData.avisoPartidosHora || '09:00' })
+        setSettingsForm({ jornada: leagueData.jornada ?? 1, actualizacionJornada: leagueData.actualizacionJornada || 'lunes', email: adminContact.email || '', duracionPartido: leagueData.duracionPartido || 60, formatoTorneo: getTournamentFormat(leagueData.formatoTorneo), avisoPartidosDia: leagueData.avisoPartidosDia || 'lunes', avisoPartidosHora: leagueData.avisoPartidosHora || '09:00' })
         setTeams(teamsData)
         setReferees(refereeData)
         setMatches(matchData)
@@ -179,12 +215,6 @@ const LeagueAdmin = () => {
   const updateField = (field, value) => setForm((current) => ({ ...current, [field]: value }))
   const updatePlayerField = (field, value) => setPlayerForm((current) => ({ ...current, [field]: value }))
   const updateViewedTeamField = (field, value) => setViewedTeamForm((current) => ({ ...current, [field]: value }))
-  const getCourtTimeOptions = (courtList, form) => {
-    const court = courtList.find((item) => item._id === form.cancha_id)
-    const day = form.fecha ? weekdayNames[new Date(`${form.fecha}T00:00`).getDay()] : null
-    const times = (court?.horarios || []).filter((slot) => !day || slot.dia === day).map((slot) => slot.horaInicio)
-    return [...new Set([...times, ...(form.hora ? [form.hora] : [])])].sort()
-  }
   const updateMatchField = (field, value) => setMatchForm((current) => ({ ...current, [field]: value }))
   const updateRefereeField = (field, value) => setRefereeForm((current) => ({ ...current, [field]: value }))
   const updateCourtField = (field, value) => setCourtForm((current) => ({ ...current, [field]: value }))
@@ -218,15 +248,23 @@ const LeagueAdmin = () => {
         hora: matchForm.hora || null,
         marcadorLocal: Number(matchForm.marcadorLocal),
         marcadorVisitante: Number(matchForm.marcadorVisitante),
+        marcadorTiempoExtraLocal: matchForm.marcadorTiempoExtraLocal === '' ? undefined : Number(matchForm.marcadorTiempoExtraLocal),
+        marcadorTiempoExtraVisitante: matchForm.marcadorTiempoExtraVisitante === '' ? undefined : Number(matchForm.marcadorTiempoExtraVisitante),
+        penalesLocal: matchForm.penalesLocal === '' ? undefined : Number(matchForm.penalesLocal),
+        penalesVisitante: matchForm.penalesVisitante === '' ? undefined : Number(matchForm.penalesVisitante),
         eventos: matchForm.eventos.map((eventItem) => ({ ...eventItem, jugador_numero: Number(eventItem.jugador_numero), minuto: Number(eventItem.minuto) })),
       }
-      if (editingMatch) await updateMatch(editingMatch._id, payload)
-      else await createMatch(payload)
+      const savedMatch = editingMatch
+        ? await updateMatch(editingMatch._id, payload)
+        : await createMatch(payload)
       setMatches(await getMatches(slug))
       setMatchForm(initialMatchForm)
       setEditingMatch(null)
       setShowMatchForm(false)
-      setStatus({ type: 'success', message: editingMatch ? 'Partido actualizado correctamente.' : 'Partido creado correctamente.' })
+      setStatus({
+        type: 'success',
+        message: [editingMatch ? 'Partido actualizado correctamente.' : 'Partido creado correctamente.', savedMatch.torneoAviso].filter(Boolean).join(' '),
+      })
     } catch (error) {
       setStatus({ type: 'error', message: error.response?.data?.message || 'No se pudo crear el partido.' })
     } finally {
@@ -376,6 +414,10 @@ const LeagueAdmin = () => {
         equipoVisitante_id: match.equipoVisitante_id._id || match.equipoVisitante_id,
         marcadorLocal: match.marcadorLocal,
         marcadorVisitante: match.marcadorVisitante,
+        marcadorTiempoExtraLocal: match.marcadorTiempoExtraLocal ?? '',
+        marcadorTiempoExtraVisitante: match.marcadorTiempoExtraVisitante ?? '',
+        penalesLocal: match.penalesLocal ?? '',
+        penalesVisitante: match.penalesVisitante ?? '',
         estado: match.estado,
         eventos: match.eventos || [],
       })
@@ -398,18 +440,37 @@ const LeagueAdmin = () => {
     setShowCourtForm(true)
   }
 
-  const openTeamDetails = async (team) => {
-    setViewedTeam(team)
-    setEditingViewedTeam(false)
-    setViewedTeamForm({ nombre: team.nombre, nombreCorto: team.nombreCorto, dtNombre: team.dt.nombre, dtWhatsapp: team.dt.whatsapp, colorPrimario: team.colorPrimario || '#1f6feb', colorSecundario: team.colorSecundario || '#ffffff', imagen: team.imagen || '', ...team.stats, racha: team.racha.join('') })
-    setTeamPlayers(await getPlayers(team._id))
-  }
-
   useEffect(() => {
     const routedTeam = codigo && teams.find((team) => team.nombreCorto.toUpperCase() === codigo.toUpperCase())
-    // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
-    if (routedTeam) openTeamDetails(routedTeam)
-  }, [codigo, teams.length])
+    if (!routedTeam) return undefined
+    let active = true
+    const loadRoutedTeam = async () => {
+      try {
+        const players = await getPlayers(routedTeam._id)
+        if (!active) return
+        setViewedTeam(routedTeam)
+        setEditingViewedTeam(false)
+        setViewedTeamForm({
+          nombre: routedTeam.nombre,
+          nombreCorto: routedTeam.nombreCorto,
+          dtNombre: routedTeam.dt.nombre,
+          dtWhatsapp: routedTeam.dt.whatsapp,
+          colorPrimario: routedTeam.colorPrimario || '#1f6feb',
+          colorSecundario: routedTeam.colorSecundario || '#ffffff',
+          imagen: routedTeam.imagen || '',
+          ...routedTeam.stats,
+          racha: routedTeam.racha.join(''),
+        })
+        setTeamPlayers(players)
+      } catch (error) {
+        if (active) {
+          setStatus({ type: 'error', message: error.response?.data?.message || 'No se pudieron cargar los jugadores del equipo.' })
+        }
+      }
+    }
+    loadRoutedTeam()
+    return () => { active = false }
+  }, [codigo, teams])
 
   const handleTeamUpdate = async (event) => {
     event.preventDefault()
@@ -450,8 +511,6 @@ const LeagueAdmin = () => {
         colorPrimario: form.colorPrimario,
         colorSecundario: form.colorSecundario,
         imagen: form.imagen.trim(),
-        stats: Object.fromEntries(['pj', 'pg', 'pe', 'pp', 'gf', 'gc'].map((key) => [key, Number(form[key])])),
-        racha: form.racha.toUpperCase().replace(/[^GEP]/g, '').split(''),
       })
       setTeams((current) => [...current, team])
       setForm(initialForm)
@@ -494,6 +553,14 @@ const LeagueAdmin = () => {
   }
 
   const canManageMatches = teams.length >= 2 && referees.length >= 1 && courts.length >= 1
+  const regularMatchCount = matches.filter((match) => !match.faseTorneo || match.faseTorneo === 'regular').length
+  const expectedRegularMatchCount = Math.floor(teams.length / 2) * getTotalJornadas(league, teams)
+  const hasCompleteInitialCalendar = Boolean(
+    league?.wizardCompletado
+    && expectedRegularMatchCount > 0
+    && regularMatchCount >= expectedRegularMatchCount,
+  )
+  const finalTieState = getFinalTieState(editingMatch, matchForm, matches)
 
   if (loading) return <div className="loading-state">Cargando administración...</div>
 
@@ -528,15 +595,15 @@ const LeagueAdmin = () => {
               <label>Jornada<input required type="number" min="0" value={settingsForm.jornada} onChange={(event) => updateSettingsField('jornada', event.target.value)} /></label>
                             <label>Correo de recuperación<input required type="email" autoComplete="email" value={settingsForm.email} onChange={(event) => updateSettingsField('email', event.target.value)} /></label>
               <label>Duración del partido (minutos)<input required type="number" min="10" max="240" step="1" value={settingsForm.duracionPartido} onChange={(event) => updateSettingsField('duracionPartido', event.target.value)} /></label>
-                            <label>Formato de torneo<select value={settingsForm.formatoTorneo} onChange={(event) => updateSettingsField('formatoTorneo', event.target.value)}><option value="todos-vs-todos-una-vuelta">Todos vs Todos una sola vuelta</option><option value="todos-vs-todos-ida-y-vuelta">Todos vs todos ida y vuelta</option></select></label>
+                            <label>Formato de torneo<select value={settingsForm.formatoTorneo} disabled={matches.length > 0} onChange={(event) => updateSettingsField('formatoTorneo', event.target.value)}><option value="LIGA_UNA_VUELTA">Liga una vuelta</option><option value="LIGA_IDA_VUELTA">Liga ida y vuelta</option><option value="LIGA_UNA_VUELTA_CON_LIGUILLA_8">Liga una vuelta + liguilla de 8</option><option value="LIGA_IDA_VUELTA_CON_LIGUILLA_8">Liga ida y vuelta + liguilla de 8</option></select>{matches.length > 0 && <small>El formato no se puede cambiar después de generar partidos.</small>}</label>
               <div className="settings-day-row">
                 <label>Actualización de jornada<select value={settingsForm.actualizacionJornada} onChange={(event) => updateSettingsField('actualizacionJornada', event.target.value)}><option value="domingo">Domingo</option><option value="lunes">Lunes</option><option value="martes">Martes</option><option value="miércoles">Miércoles</option><option value="jueves">Jueves</option><option value="viernes">Viernes</option><option value="sábado">Sábado</option></select></label>
                 <Button variant="outline-primary" type="button" onClick={() => setShowAdvanceConfirmation(true)} disabled={saving || showAdvanceConfirmation}>{saving ? 'Avanzando...' : 'Avanzar jornada'}</Button>
               </div>
-              <label>Día para enviar avisos de partidos<select value={settingsForm.avisoPartidosDia} onChange={(event) => updateSettingsField('avisoPartidosDia', event.target.value)}><option value="domingo">Domingo</option><option value="lunes">Lunes</option><option value="martes">Martes</option><option value="miércoles">Miércoles</option><option value="jueves">Jueves</option><option value="viernes">Viernes</option><option value="sábado">Sábado</option></select></label>
-              <label>Hora para enviar avisos<input required type="time" value={settingsForm.avisoPartidosHora} onChange={(event) => updateSettingsField('avisoPartidosHora', event.target.value)} /></label>
+              <label>Día para enviar avisos a árbitros<select value={settingsForm.avisoPartidosDia} onChange={(event) => updateSettingsField('avisoPartidosDia', event.target.value)}><option value="domingo">Domingo</option><option value="lunes">Lunes</option><option value="martes">Martes</option><option value="miércoles">Miércoles</option><option value="jueves">Jueves</option><option value="viernes">Viernes</option><option value="sábado">Sábado</option></select></label>
+              <label>Hora para enviar avisos a árbitros<input required type="time" value={settingsForm.avisoPartidosHora} onChange={(event) => updateSettingsField('avisoPartidosHora', event.target.value)} /></label>
               {showAdvanceConfirmation && <div className="advance-confirmation" role="alert">
-                <p>Al adelantar la jornada se enviarán por WhatsApp los detalles de los partidos pendientes a los árbitros y contactos DT de ambos equipos. ¿Deseas continuar?</p>
+                <p>Al adelantar la jornada se enviarán por WhatsApp los detalles de los partidos pendientes a sus árbitros para que confirmen asistencia. ¿Deseas continuar?</p>
                 <div className="advance-confirmation-actions">
                   <Button variant="outline-secondary" type="button" onClick={() => setShowAdvanceConfirmation(false)} disabled={saving}>Cancelar</Button>
                   <Button variant="danger" type="button" onClick={handleAdvanceJornada} disabled={saving}>{saving ? 'Avanzando y enviando...' : 'Confirmar avance'}</Button>
@@ -564,9 +631,58 @@ const LeagueAdmin = () => {
           <div className="admin-section-tabs"><Button variant={activeSection === 'equipos' ? 'primary' : 'outline-primary'} onClick={() => setActiveSection('equipos')}>Equipos</Button><Button variant={activeSection === 'arbitros' ? 'primary' : 'outline-primary'} onClick={() => setActiveSection('arbitros')}>Árbitros</Button><Button variant={activeSection === 'canchas' ? 'primary' : 'outline-primary'} onClick={() => setActiveSection('canchas')}>Canchas</Button><OverlayTrigger placement="top" overlay={canManageMatches ? <span /> : <Tooltip id="partidos-requisitos">Se ocupan mínimo 2 equipos, un árbitro y una cancha</Tooltip>}><span className="d-inline-block" tabIndex={canManageMatches ? -1 : 0}><Button variant={activeSection === 'partidos' ? 'primary' : 'outline-primary'} disabled={!canManageMatches} style={canManageMatches ? undefined : { pointerEvents: 'none' }} onClick={() => setActiveSection('partidos')}>Partidos</Button></span></OverlayTrigger></div>
        
         <section className="league-admin-scoped-list">
-          {activeSection === 'equipos' && <><div className="list-heading"><Button variant="primary" onClick={() => { setForm(initialForm); setShowTeamForm(true) }}>Crear equipo</Button></div>{teams.length === 0 && <p className="empty-players">Todavía no hay equipos registrados.</p>}<TeamGrid teams={teams} onView={(team) => navigate(`/${slug}/equipo/${team.nombreCorto}`)} /></>}
+          {activeSection === 'equipos' && <>{teams.length === 0 && <p className="empty-players">Todavía no hay equipos registrados.</p>}<TeamGrid teams={teams} onView={(team) => navigate(`/${slug}/equipo/${team.nombreCorto}`)} /></>}
           {activeSection === 'arbitros' && <><div className="list-heading"><Button variant="primary" onClick={() => openRefereeEditor()}>Añadir árbitro</Button></div>{referees.length === 0 && <p className="empty-players">Todavía no hay árbitros registrados.</p>}{referees.map((referee) => <article className="league-team-row" key={referee._id}><span><strong>{referee.nombre}</strong><small>{referee.telefono} · {referee.estado}</small></span><Button variant="outline-primary" onClick={() => openRefereeEditor(referee)}>Editar</Button></article>)}</>}
-          {activeSection === 'partidos' && <><div className="list-heading"><div className="league-card-actions"><Button variant="primary" onClick={() => openMatchEditor()}>Crear partido</Button><Button variant="outline-primary" onClick={() => setShowAutoConfirm(true)} disabled={saving}>{saving ? 'Generando...' : 'Crear partidos automáticamente'}</Button></div></div>{matches.length === 0 && <p className="empty-players">Todavía no hay partidos registrados.</p>}{groupMatchesByJornada(matches).map(([jornada, jornadaMatches]) => <details className="jornada-group" key={jornada}><summary>{jornadaMatches.some(hasPendingAssignment) && <span className="pending-dot" title="Hay datos por asignar" />}Jornada {jornada}<small> &nbsp;&nbsp; {jornadaMatches.length} partidos</small></summary>{jornadaMatches.map((match) => <article className="match-row" key={match._id}><div className="match-row-main"><div className="match-row-teams">{[match.equipoLocal_id, match.equipoVisitante_id].map((ref, idx) => { const team = teams.find((item) => item._id === (ref?._id || ref)) || ref; return [idx === 1 && <strong key="vs" className="match-row-vs">VS</strong>, <span key={team._id} className="match-row-team" style={{ backgroundColor: team.colorPrimario || '#1e293b' }}>{team.imagen ? <img src={team.imagen} alt="" className="match-row-shield" /> : <span className="match-row-shield match-row-shield-empty" style={{ backgroundColor: team.colorSecundario || '#475569' }} />}{team.nombre}</span>] })}</div><div className="match-row-meta"><span className="match-row-estado">{match.estado}</span><span className="match-row-chip">🕒 {match.marcadorLocal} - {match.marcadorVisitante}</span><span>📅 {match.fecha ? new Date(match.fecha).toLocaleDateString() : <span className="pending-text">Fecha por asignar</span>}{match.hora ? ` • ${match.hora}` : ''}</span><span>📍 {match.cancha_id?.nombre || <span className="pending-text">Cancha por asignar</span>}</span>{match.arbitro_id?.nombre ? <span>🧑‍⚖️ {match.arbitro_id.nombre}</span> : <span className="match-row-warn">⚠ Árbitro por asignar</span>}</div></div><Button variant="primary" className="match-row-edit" onClick={() => openMatchEditor(match)}>✏️ Editar</Button></article>)}</details>)}</>}
+          {activeSection === 'partidos' && <>
+            {!hasCompleteInitialCalendar && <div className="list-heading">
+              <div className="league-card-actions">
+                <Button variant="primary" onClick={() => openMatchEditor()}>Crear partido</Button>
+                <Button variant="outline-primary" onClick={() => setShowAutoConfirm(true)} disabled={saving}>
+                  {saving ? 'Generando...' : 'Crear partidos automáticamente'}
+                </Button>
+              </div>
+            </div>}
+            {matches.length === 0 && <p className="empty-players">Todavía no hay partidos registrados.</p>}
+            {groupMatchesByJornada(matches).map(([jornada, jornadaMatches]) => (
+              <details className="jornada-group" key={jornada}>
+                <summary>
+                  {jornadaMatches.some(hasPendingAssignment) && <span className="pending-dot" title="Hay datos por asignar" />}
+                  {getMatchPhaseLabel(jornadaMatches[0].faseTorneo)} · Jornada {jornada}
+                  <small> &nbsp;&nbsp; {jornadaMatches.length} partidos</small>
+                </summary>
+                {jornadaMatches.map((match) => <article className="match-row" key={match._id}>
+                  <div className="match-row-main">
+                    <div className="match-row-teams">{[match.equipoLocal_id, match.equipoVisitante_id].map((ref, idx) => {
+                      const team = teams.find((item) => item._id === (ref?._id || ref)) || ref
+                      return [
+                        idx === 1 && <strong key="vs" className="match-row-vs">VS</strong>,
+                        <span key={team._id} className="match-row-team" style={{ backgroundColor: team.colorPrimario || '#1e293b' }}>
+                          {team.imagen
+                            ? <img src={team.imagen} alt="" className="match-row-shield" />
+                            : <span className="match-row-shield match-row-shield-empty" style={{ backgroundColor: team.colorSecundario || '#475569' }} />}
+                          {team.nombre}
+                        </span>,
+                      ]
+                    })}</div>
+                    <div className="match-row-meta">
+                      <span className="match-row-estado">{match.estado}</span>
+                      {match.faseTorneo && match.faseTorneo !== 'regular' && <span>{match.partidoSerie === 1 ? 'Ida' : 'Vuelta'} · {match.serieId}</span>}
+                      <span className="match-row-chip">🕒 {match.marcadorLocal} - {match.marcadorVisitante}</span>
+                      {match.desempatePor === 'posicionTabla' && <span>Desempate: posición de tabla</span>}
+                      {match.faseTorneo === 'final' && match.equipoGanador_id && <span>Campeón decidido por {match.desempatePor === 'penales' ? 'penales' : 'tiempo extra'}</span>}
+                      <span>📅 {match.fecha ? new Date(match.fecha).toLocaleDateString() : <span className="pending-text">Fecha por asignar</span>}{match.hora ? ` • ${match.hora}` : ''}</span>
+                      <span>📍 {match.cancha_id?.nombre || <span className="pending-text">Cancha por asignar</span>}</span>
+                      {match.arbitro_id?.nombre ? <span>🧑‍⚖️ {match.arbitro_id.nombre}</span> : <span className="match-row-warn">⚠ Árbitro por asignar</span>}
+                    </div>
+                  </div>
+                  <div className="match-row-actions">
+                    {match.estado !== 'finalizado' && <Button variant="outline-warning" onClick={() => setReschedulingMatch(match)}>Reasignar</Button>}
+                    <Button variant="primary" className="match-row-edit" onClick={() => openMatchEditor(match)}>✏️ Editar</Button>
+                  </div>
+                </article>)}
+              </details>
+            ))}
+          </>}
           {activeSection === 'canchas' && <><div className="list-heading"><Button variant="primary" onClick={() => openCourtEditor()}>Crear cancha</Button></div>{courts.length === 0 && <p className="empty-players">Todavía no hay canchas registradas.</p>}{courts.map((court) => <article className="league-team-row" key={court._id}><span><strong>{court.nombre}</strong><small>{court.estado} · {(court.horarios || []).length} horario(s)</small></span><Button variant="outline-primary" onClick={() => openCourtEditor(court)}>Editar</Button></article>)}</>}
         </section>
 
@@ -599,14 +715,12 @@ const LeagueAdmin = () => {
               <div className="form-grid">
                 <label>Nombre<input required value={form.nombre} onChange={(event) => updateField('nombre', event.target.value)} /></label>
                 <label>Nombre corto<input required maxLength="5" value={form.nombreCorto} onChange={(event) => updateField('nombreCorto', event.target.value)} /></label>
-                <label>Nombre del DT<input required value={form.dtNombre} onChange={(event) => updateField('dtNombre', event.target.value)} /></label>
-                <label>WhatsApp del DT<input required value={form.dtWhatsapp} onChange={(event) => updateField('dtWhatsapp', event.target.value)} /></label>
+                <label>Nombre del DT o capitán<input required value={form.dtNombre} onChange={(event) => updateField('dtNombre', event.target.value)} /></label>
+                <label>Número de contacto<input required type="tel" autoComplete="tel" value={form.dtWhatsapp} onChange={(event) => updateField('dtWhatsapp', event.target.value)} /></label>
                 <label>Color principal<input type="color" value={form.colorPrimario} onChange={(event) => updateField('colorPrimario', event.target.value)} /></label>
                 <label>Color secundario<input type="color" value={form.colorSecundario} onChange={(event) => updateField('colorSecundario', event.target.value)} /></label>
                 <label>Imagen (URL)<input type="url" placeholder="https://..." value={form.imagen} onChange={(event) => updateField('imagen', event.target.value)} /></label>
-                <label>Racha<input placeholder="GGGEG" pattern="[GgEePp]*" value={form.racha} onChange={(event) => updateField('racha', event.target.value)} /></label>
               </div>
-              <div className="form-section"><h2>Estadísticas iniciales</h2><div className="stats-form-grid">{['pj', 'pg', 'pe', 'pp', 'gf', 'gc'].map((key) => <label key={key}>{key.toUpperCase()}<input type="number" min="0" value={form[key]} onChange={(event) => updateField(key, event.target.value)} /></label>)}<label>DG<input type="number" readOnly value={Number(form.gf) - Number(form.gc)} /></label><label>PTS<input type="number" readOnly value={(Number(form.pg) * 3) + Number(form.pe)} /></label></div></div>
               <Button variant="primary" type="submit" disabled={saving}>{saving ? 'Guardando...' : 'Guardar equipo'}</Button>
             </form>
           </Modal.Body>
@@ -667,7 +781,7 @@ const LeagueAdmin = () => {
                 <div className="match-form-row match-form-row-three">
                   <label><span className="fl fl-date"><i className="fi fi-date">📅</i>Fecha</span><input type="date" disabled={!matchForm.cancha_id} value={matchForm.fecha} onChange={(event) => updateMatchField('fecha', event.target.value)} /></label>
                   <label><span className="fl fl-time"><i className="fi fi-time">🕒</i>Hora</span><input type="time" value={matchForm.hora} onChange={(event) => updateMatchField('hora', event.target.value)} /></label>
-                  {!editingMatch && <label>Estado<select value={matchForm.estado} onChange={(event) => updateMatchField('estado', event.target.value)}><option value="programado">Pendiente</option><option value="finalizado">Finalizado</option><option value="suspendido">Suspendido</option></select></label>}
+                  <label>Estado<select value={matchForm.estado} onChange={(event) => updateMatchField('estado', event.target.value)}><option value="programado">Pendiente</option><option value="en_curso">En curso</option><option value="finalizado">Finalizado</option><option value="suspendido">Suspendido</option></select></label>
                 </div>
                 {!editingMatch && <div className="match-form-row match-form-row-two">
                   <label>Equipo local<select required disabled={Boolean(editingMatch)} value={matchForm.equipoLocal_id} onChange={(event) => updateMatchField('equipoLocal_id', event.target.value)}><option value="">Selecciona equipo</option>{teams.filter((team) => team._id !== matchForm.equipoVisitante_id).map((team) => <option key={team._id} value={team._id}>{team.nombre}</option>)}</select></label>
@@ -676,6 +790,14 @@ const LeagueAdmin = () => {
                 {!['programado', 'suspendido'].includes(matchForm.estado) && <div className="match-form-row match-form-row-two">
                   <label>Marcador local<input type="number" min="0" value={matchForm.marcadorLocal} onChange={(event) => updateMatchField('marcadorLocal', event.target.value)} /></label>
                   <label>Marcador visitante<input type="number" min="0" value={matchForm.marcadorVisitante} onChange={(event) => updateMatchField('marcadorVisitante', event.target.value)} /></label>
+                </div>}
+                {editingMatch?.faseTorneo === 'final' && editingMatch.partidoSerie === 2 && finalTieState.tied && <div className="match-form-row match-form-row-two">
+                  <label>Tiempo extra · goles local<input required type="number" min="0" value={matchForm.marcadorTiempoExtraLocal} onChange={(event) => updateMatchField('marcadorTiempoExtraLocal', event.target.value)} /></label>
+                  <label>Tiempo extra · goles visitante<input required type="number" min="0" value={matchForm.marcadorTiempoExtraVisitante} onChange={(event) => updateMatchField('marcadorTiempoExtraVisitante', event.target.value)} /></label>
+                  {finalTieState.extraTimeTied && <>
+                    <label>Penales · local<input required type="number" min="0" value={matchForm.penalesLocal} onChange={(event) => updateMatchField('penalesLocal', event.target.value)} /></label>
+                    <label>Penales · visitante<input required type="number" min="0" value={matchForm.penalesVisitante} onChange={(event) => updateMatchField('penalesVisitante', event.target.value)} /></label>
+                  </>}
                 </div>}
               </div>
               {!['programado', 'suspendido'].includes(matchForm.estado) && <div className="form-section"><div className="form-section-heading"><h2>Eventos</h2><Button type="button" variant="outline-secondary" onClick={() => setMatchForm((current) => ({ ...current, eventos: [...current.eventos, { ...emptyEvent, equipo_id: current.equipoLocal_id }] }))}>Agregar evento</Button></div>
@@ -715,8 +837,8 @@ const LeagueAdmin = () => {
                 <div className="form-grid">
                   <label>Nombre<input required value={viewedTeamForm.nombre} onChange={(event) => updateViewedTeamField('nombre', event.target.value)} /></label>
                   <label>Nombre corto<input required maxLength="5" value={viewedTeamForm.nombreCorto} onChange={(event) => updateViewedTeamField('nombreCorto', event.target.value)} /></label>
-                  <label>Nombre del DT<input required value={viewedTeamForm.dtNombre} onChange={(event) => updateViewedTeamField('dtNombre', event.target.value)} /></label>
-                  <label>WhatsApp del DT<input required value={viewedTeamForm.dtWhatsapp} onChange={(event) => updateViewedTeamField('dtWhatsapp', event.target.value)} /></label>
+                  <label>Nombre del DT o capitán<input required value={viewedTeamForm.dtNombre} onChange={(event) => updateViewedTeamField('dtNombre', event.target.value)} /></label>
+                  <label>Número de contacto<input required type="tel" autoComplete="tel" value={viewedTeamForm.dtWhatsapp} onChange={(event) => updateViewedTeamField('dtWhatsapp', event.target.value)} /></label>
                   <label>Color principal<input type="color" value={viewedTeamForm.colorPrimario} onChange={(event) => updateViewedTeamField('colorPrimario', event.target.value)} /></label>
                   <label>Color secundario<input type="color" value={viewedTeamForm.colorSecundario} onChange={(event) => updateViewedTeamField('colorSecundario', event.target.value)} /></label>
                   <label>Imagen (URL)<input type="url" placeholder="https://..." value={viewedTeamForm.imagen} onChange={(event) => updateViewedTeamField('imagen', event.target.value)} /></label>
@@ -746,13 +868,24 @@ const LeagueAdmin = () => {
             </form>
           </Modal.Body>
         </Modal>
+        {reschedulingMatch && <CalendarRescheduler
+          key={reschedulingMatch._id}
+          show
+          onHide={() => setReschedulingMatch(null)}
+          slug={slug}
+          jornada={reschedulingMatch?.jornada}
+          match={reschedulingMatch}
+          matches={matches}
+          courts={courts}
+          referees={referees}
+          onConfirmed={async () => {
+            setMatches(await getMatches(slug))
+            setStatus({ type: 'success', message: 'Reasignación confirmada y registrada en la bitácora.' })
+          }}
+        />}
       </main>
     </div>
   )
 }
 
 export default LeagueAdmin
-
-
-
-

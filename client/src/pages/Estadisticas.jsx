@@ -1,8 +1,9 @@
 import { useSelector } from 'react-redux'
-import { selectStats } from '../features/league/leagueSlice'
+import { selectStats, selectTeams } from '../features/league/leagueSlice'
 import LeagueHeader from '../components/LeagueHeader'
+import PublicTeamLink from '../components/PublicTeamLink'
 
-const StatCard = ({ title, subtitle, icon, accent, columns, rows }) => (
+const StatCard = ({ title, subtitle, icon, accent, columns, rows, teams }) => (
   <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden" style={{ borderTop: `4px solid ${accent}` }}>
     <div className="flex items-center gap-2 px-5 pt-4">
       <span className="text-xl">{icon}</span>
@@ -21,7 +22,11 @@ const StatCard = ({ title, subtitle, icon, accent, columns, rows }) => (
         {rows.map((row, index) => (
           <tr key={`${row.jugador}-${index}`} className="border-t border-gray-100 hover:bg-slate-50/60">
             <td className="py-3 px-5 font-semibold text-slate-800">{row.jugador}</td>
-            <td className="text-slate-600">{row.equipo}</td>
+            <td className="text-slate-600">
+              {columns[1] === 'Equipo'
+                ? <PublicTeamLink team={teams.find((team) => team.nombre === row.equipo)} className="text-slate-600">{row.equipo}</PublicTeamLink>
+                : row.equipo}
+            </td>
             <td className="text-center px-5 font-extrabold text-blue-700">
               {row.goles ?? row.partidos ?? row.rojas ?? row.amarillas}
             </td>
@@ -41,21 +46,22 @@ const StatCard = ({ title, subtitle, icon, accent, columns, rows }) => (
 
 const Estadisticas = () => {
   const stats = useSelector(selectStats)
+  const teams = useSelector(selectTeams)
   const loading = useSelector((state) => state.league.loading)
   const { goleadores, porteros, tarjetasRojas, tarjetasAmarillas } = stats
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] p-3 md:p-6">
+    <div className="statistics-page min-h-screen bg-[#f8fafc] p-3 md:p-6">
       <LeagueHeader />
 
       {loading ? (
         <div className="bg-white rounded-2xl p-10 text-center">Cargando estadísticas...</div>
       ) : (
         <main className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <StatCard title="Goleador" subtitle="(Máximos goleadores)" icon="🏆" accent="#0e4a9b" columns={['Jugador', 'Equipo', 'Goles']} rows={goleadores} />
-          <StatCard title="Arcos en 0" subtitle="Porteros con valla invicta" icon="🧤" accent="#7c3aed" columns={['Jugador', 'Equipo', 'Partidos']} rows={porteros} />
-          <StatCard title="Tarjeta Roja" subtitle="Expulsiones" icon="🟥" accent="#d92d4d" columns={['Jugador', 'Equipo', 'Roj.']} rows={tarjetasRojas} />
-          <StatCard title="Tarjeta Amarilla" subtitle="Amonestaciones" icon="🟨" accent="#d9a000" columns={['Jugador', 'Equipo', 'Amar.']} rows={tarjetasAmarillas} />
+          <StatCard title="Goleador" subtitle="(Máximos goleadores)" icon="🏆" accent="#0e4a9b" columns={['Jugador', 'Equipo', 'Goles']} rows={goleadores} teams={teams} />
+          <StatCard title="Arcos en 0" subtitle="Porteros con valla invicta" icon="🧤" accent="#7c3aed" columns={['Jugador', 'Equipo', 'Partidos']} rows={porteros} teams={teams} />
+          <StatCard title="Tarjeta Roja" subtitle="Expulsiones" icon="🟥" accent="#d92d4d" columns={['Jugador', 'Equipo', 'Roj.']} rows={tarjetasRojas} teams={teams} />
+          <StatCard title="Tarjeta Amarilla" subtitle="Amonestaciones" icon="🟨" accent="#d9a000" columns={['Jugador', 'Equipo', 'Amar.']} rows={tarjetasAmarillas} teams={teams} />
         </main>
       )}
     </div>

@@ -23,11 +23,28 @@ export const getMissingWhatsAppConfig = () => {
   ].filter(([, value]) => !value).map(([name]) => name)
 }
 
+export const getMissingWhatsAppApiConfig = () => [
+  ['WHATSAPP_ACCESS_TOKEN', process.env.WHATSAPP_ACCESS_TOKEN],
+  ['WHATSAPP_PHONE_NUMBER_ID', process.env.WHATSAPP_PHONE_NUMBER_ID],
+].filter(([, value]) => !value).map(([name]) => name)
+
 export const normalizeWhatsAppPhone = normalizeContactPhone
 
-export const sendMatchTemplate = async ({ phoneNumber, recipientName, localTeam, visitorTeam, date, time, court, leagueName, jornada }) => {
+export const sendMatchTemplate = async ({
+  phoneNumber,
+  recipientName,
+  localTeam,
+  visitorTeam,
+  date,
+  time,
+  court,
+  leagueName,
+  jornada,
+  templateParameters,
+  templateName = getCloudConfig().templateName,
+}) => {
   const config = getCloudConfig()
-  const missingConfig = getMissingWhatsAppConfig()
+  const missingConfig = templateName ? getMissingWhatsAppApiConfig() : getMissingWhatsAppConfig()
   if (missingConfig.length) throw new Error(`Falta configurar: ${missingConfig.join(', ')}`)
 
   const normalizedPhone = normalizeWhatsAppPhone(phoneNumber)
@@ -48,11 +65,11 @@ export const sendMatchTemplate = async ({ phoneNumber, recipientName, localTeam,
       to: normalizedPhone,
       type: 'template',
       template: {
-        name: config.templateName,
+        name: templateName,
         language: { code: config.templateLanguage },
         components: [{
           type: 'body',
-          parameters: [recipientName, localTeam, visitorTeam, date, time, court, leagueName, String(jornada)]
+          parameters: (templateParameters || [recipientName, localTeam, visitorTeam, date, time, court, leagueName, String(jornada)])
             .map((text) => ({ type: 'text', text: String(text || '-') })),
         }],
       },
@@ -62,6 +79,38 @@ export const sendMatchTemplate = async ({ phoneNumber, recipientName, localTeam,
   const result = await response.json().catch(() => ({}))
   if (!response.ok) {
     throw new Error(result.error?.message || `WhatsApp Cloud API respondió HTTP ` + response.status)
+  }
+
+  return { messageId: result.messages?.[0]?.id || null, status: result.messages?.[0]?.message_status || 'accepted' }
+}
+
+export const sendWhatsAppText = async ({ phoneNumber, message }) => {
+  const missingConfig = getMissingWhatsAppApiConfig()
+  if (missingConfig.length) throw new Error(`Falta configurar: ${missingConfig.join(', ')}`)
+
+  const normalizedPhone = normalizeWhatsAppPhone(phoneNumber)
+  if (!/^\d{8,15}$/.test(normalizedPhone)) {
+    throw new Error('El teléfono debe incluir el código de país y tener entre 8 y 15 dígitos')
+  }
+
+  const response = await fetch(`https://graph.facebook.com/${process.env.WHATSAPP_GRAPH_API_VERSION || 'v23.0'}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: normalizedPhone,
+      type: 'text',
+      text: { body: message },
+    }),
+  })
+
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(result.error?.message || `WhatsApp Cloud API respondió HTTP ${response.status}`)
   }
 
   return { messageId: result.messages?.[0]?.id || null, status: result.messages?.[0]?.message_status || 'accepted' }
@@ -82,6 +131,8 @@ export const sendRefereeTemplateWithButtons = async ({
   matchId = 'test' 
 }) => {
   const config = getCloudConfig()
+  const missingConfig = getMissingWhatsAppApiConfig()
+  if (missingConfig.length) throw new Error(`Falta configurar: ${missingConfig.join(', ')}`)
   
   const normalizedPhone = normalizeWhatsAppPhone(phoneNumber)
   if (!/^\d{8,15}$/.test(normalizedPhone)) {
@@ -150,8 +201,15 @@ export const sendRefereeTemplateWithButtons = async ({
 }
 
 export const sendAlertaArbitro = async (match, options = {}) => {
-  const adminPhone = process.env.ADMIN_WHATSAPP_NUMBER || process.env.WHATSAPP_SCHEDULED_TEST_PHONE || 'admin'
+  const adminPhone = options.adminPhone || process.env.ADMIN_WHATSAPP_NUMBER || process.env.WHATSAPP_SCHEDULED_TEST_PHONE
   const normalizedAdminPhone = normalizeWhatsAppPhone(adminPhone)
+  const shouldSend = options.sendWhatsApp ?? (process.env.TEST_MODE !== 'true')
+  if (!/^\d{8,15}$/.test(normalizedAdminPhone)) {
+    throw new Error('El teléfono de WhatsApp del administrador no está configurado correctamente.')
+  }
+  if (shouldSend && (!process.env.WHATSAPP_ACCESS_TOKEN || !process.env.WHATSAPP_PHONE_NUMBER_ID)) {
+    throw new Error('Falta configurar la API de WhatsApp para enviar la alerta al administrador.')
+  }
 
   const idPartido = match.idPartido || '-'
   const equipoLocal = match.equipoLocal_id?.nombre || 'Equipo Local'
@@ -161,7 +219,9 @@ export const sendAlertaArbitro = async (match, options = {}) => {
   const cancha = match.cancha_id?.nombre || 'Cancha por confirmar'
   const nombreArbitro = match.arbitro_id?.nombre || 'Árbitro'
   const telArbitro = match.arbitro_id?.telefono || 'Sin teléfono'
-  const motivo = options.motivo || match.arbitro_motivo_rechazo || 'No puedo asistir'
+  const motivo = options.motivo || match.arbitro_motivo_respuesta || match.arbitro_motivo_rechazo || 'No puedo asistir'
+  const adminName = options.adminName || 'Admin'
+  const message = `ATENCIÓN ADMIN - ARBITRAJE REQUIERE ACCIÓN\n\nHola ${adminName}, el partido ${idPartido} necesita reasignación de árbitro:\n\n${equipoLocal} vs ${equipoVisitante}\nFecha: ${fecha} ${hora}\nCancha: ${cancha}\n\nÁrbitro asignado: ${nombreArbitro}\nTelefono: ${telArbitro}\nMotivo: ${motivo}\n\nFavor de solucionar y confirmar en barrio leagues.`
 
   const variables = [
     String(idPartido),
@@ -175,44 +235,82 @@ export const sendAlertaArbitro = async (match, options = {}) => {
     String(motivo),
   ]
 
-  console.log(`[WhatsApp] 🚨 [PREPARADA] sendAlertaArbitro (Plantilla: alerta_arbitro) para ADMIN_WHATSAPP_NUMBER (${adminPhone} -> ${normalizedAdminPhone}):`)
-  variables.forEach((v, idx) => {
-    console.log(`  {{${idx + 1}}} = ${v}`)
-  })
-
   let log = null
-  if (mongoose.connection.readyState === 1) {
+  if (options.recordLog !== false && mongoose.connection.readyState === 1) {
+    log = await NotificationLog.create({
+      match_id: match._id,
+      to: normalizedAdminPhone,
+      recipient_name: adminName,
+      role: 'admin',
+      type: 'admin_alert',
+      message,
+      status: shouldSend ? 'pending' : 'simulated',
+      sent_at: shouldSend ? undefined : new Date(),
+      test_mode: !shouldSend,
+      metadata: {
+        template: 'alerta_arbitro',
+        variables,
+        idPartido,
+        match_date: match.fecha,
+        match_time: match.hora,
+        referee_name: nombreArbitro,
+        referee_phone: telArbitro,
+        motivo,
+      },
+    })
+  }
+
+  let messageId = null
+  if (shouldSend) {
     try {
-      log = await NotificationLog.create({
-        match_id: match._id,
-        to: adminPhone,
-        recipient_name: 'Administrador',
-        role: 'admin',
-        type: 'referee_rejection',
-        message: `[ALERTA_ARBITRO] Partido ${idPartido}: Árbitro ${nombreArbitro} (${telArbitro}) no disponible. Motivo: ${motivo}`,
-        status: 'simulated',
-        metadata: {
-          template: 'alerta_arbitro',
-          variables,
-          idPartido,
-          match_date: match.fecha,
-          match_time: match.hora,
-          referee_name: nombreArbitro,
-          referee_phone: telArbitro,
-          motivo,
+      const response = await fetch(`https://graph.facebook.com/${process.env.WHATSAPP_GRAPH_API_VERSION || 'v23.0'}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: normalizedAdminPhone,
+          type: 'template',
+          template: {
+            name: 'alerta_arbitro',
+            language: { code: process.env.WHATSAPP_MATCH_TEMPLATE_LANGUAGE || 'es_MX' },
+            components: [{
+              type: 'body',
+              parameters: variables.map((text) => ({ type: 'text', text })),
+            }],
+          },
+        }),
       })
-    } catch (err) {
-      console.error(`[WhatsApp] Error registrando log para sendAlertaArbitro:`, err.message)
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(result.error?.message || `WhatsApp Cloud API respondió HTTP ${response.status}`)
+      }
+      messageId = result.messages?.[0]?.id || null
+      if (log) {
+        log.status = 'sent'
+        log.sent_at = new Date()
+        log.metadata = { ...log.metadata, messageId }
+        await log.save()
+      }
+    } catch (error) {
+      if (log) {
+        log.status = 'failed'
+        log.error_message = error.message
+        await log.save()
+      }
+      throw error
     }
   }
 
-  // Aún NO la envíes, solo déjala preparada con logs y usando ADMIN_WHATSAPP_NUMBER del .env
   return {
     success: true,
-    prepared: true,
-    adminPhone,
+    status: shouldSend ? 'sent' : 'simulated',
+    adminPhone: normalizedAdminPhone,
     variables,
     logId: log?._id || null,
+    messageId,
   }
 }

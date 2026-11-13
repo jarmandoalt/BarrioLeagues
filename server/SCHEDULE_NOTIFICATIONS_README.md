@@ -27,6 +27,12 @@ npm install node-cron dayjs
 
 ## ⚙️ Configuración
 
+## Avance automático de jornadas
+
+El cron revisa las fechas de `config.fechasJornadas` y avanza cada liga activa a la jornada cuya fecha de inicio ya llegó. Si el servidor estuvo detenido, se pone al corriente hasta la jornada que corresponda a la fecha actual.
+
+Los partidos anteriores sin marcador permanecen en estado `programado` (mostrado como **Pendiente**). Si alguno quedó `en_curso` o `suspendido` sin marcador ni eventos, se devuelve a `programado`; los partidos finalizados o con resultado registrado no se modifican.
+
 ### En Producción
 
 1. Abre el archivo `.env` en la carpeta `server/`
@@ -34,9 +40,14 @@ npm install node-cron dayjs
 3. Configura tus credenciales de WhatsApp:
    - `WHATSAPP_ACCESS_TOKEN`
    - `WHATSAPP_PHONE_NUMBER_ID`
-   - etc.
+   - `WHATSAPP_APP_SECRET`
+   - `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
+4. En Meta Developers, configura el callback público como `https://<dominio>/api/webhook/button-response`, usa el mismo valor de `WHATSAPP_WEBHOOK_VERIFY_TOKEN` y suscribe la aplicación al campo `messages`.
+5. Si el servidor está detrás de un proxy o túnel, apunta el callback al puerto local `5006` con `node src/scripts/whatsappWebhookGateway.js`; ese gateway solo expone la ruta del webhook y reenvía al API en el puerto `5005`.
 
 El sistema ejecutará automáticamente a las **8:00 AM** cada día.
+
+Los árbitros pueden confirmar o rechazar con los botones de su plantilla, o responder por texto. Los capitanes pueden responder por texto con `SI` o `NO`; si tienen más de un partido pendiente, deben incluir el rol y el ID de seis dígitos, por ejemplo `CAPITAN SI 123456` o `ARBITRO NO 123456`. Las respuestas se guardan en `notifications_log`.
 
 ### En Modo Pruebas
 
@@ -54,7 +65,8 @@ npm run dev
 - 1 hora real = 1 minuto en pruebas
 - El cron ejecuta cada 1 minuto (en lugar de a las 8:00 AM)
 - 8 horas de confirmación del árbitro = 8 minutos
-- WhatsApp no se envía realmente, solo logs en consola y BD
+- Las notificaciones programadas no se envían realmente; solo se registran en consola y BD
+- Para recibir respuestas reales, Meta debe tener configurado el webhook público y el servidor debe seguir accesible desde internet
 
 ## 🧪 Pruebas - Endpoints Disponibles
 
@@ -348,6 +360,12 @@ El sistema ejecuta automáticamente:
 - Verifica credenciales de WhatsApp en `.env`
 - Asegúrate que `TEST_MODE=false`
 - Revisa los logs en la tabla `notificationlogs` con `status=failed`
+
+### No se reciben respuestas de WhatsApp
+- Verifica que Meta Developers apunte a `/api/webhook/button-response`, que el callback se haya verificado y que esté suscrito a `messages`
+- Mantén activo el servidor y, si usas el gateway, `node src/scripts/whatsappWebhookGateway.js`
+- Comprueba que `WHATSAPP_APP_SECRET` y `WHATSAPP_WEBHOOK_VERIFY_TOKEN` coincidan con la configuración de Meta
+- Para respuestas de capitanes, verifica que el aviso outbound tenga estado `sent` o `delivered` en `notifications_log`
 
 ## 📝 Campos Agregados al Modelo Match
 

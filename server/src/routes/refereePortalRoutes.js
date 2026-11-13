@@ -6,7 +6,8 @@ import { League } from '../models/League.js'
 import { Match } from '../models/Match.js'
 import { Team } from '../models/Team.js'
 import { Player } from '../models/Player.js'
-import { updateTeamStatsFromMatch } from '../services/matchStats.js'
+import { recalculateTeamStats } from '../services/matchStats.js'
+import { advanceLeaguePlayoffs } from '../services/leagueTournament.js'
 
 export const refereePortalRoutes = Router()
 
@@ -184,8 +185,13 @@ refereePortalRoutes.post('/ligas/:slug/arbitros/:matchId/reporte', submitReportL
     )
     if (!updatedMatch) return res.status(409).json({ message: 'El partido ya fue reportado por otra sesión' })
 
-    await updateTeamStatsFromMatch(localTeam, visitorTeam, marcadorLocal, marcadorVisitante)
-    return res.json({ saved: true, match: await populateRefereeMatch(Match.findById(updatedMatch._id)) })
+    await recalculateTeamStats([localId, visitorId])
+    const torneoAviso = await advanceLeaguePlayoffs(slug)
+    return res.json({
+      saved: true,
+      match: await populateRefereeMatch(Match.findById(updatedMatch._id)),
+      ...(torneoAviso && { torneoAviso }),
+    })
   } catch (error) {
     return res.status(400).json({ message: 'No se pudo guardar el reporte', error: error.message })
   }

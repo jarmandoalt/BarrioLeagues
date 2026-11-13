@@ -36,8 +36,10 @@ const teamSchema = new mongoose.Schema(
       trim: true,
       default: '',
       validate: {
-        validator: (value) => !value || /^https?:\/\/\S+$/i.test(value),
-        message: 'La imagen debe ser una URL válida (http o https)',
+        validator: (value) => !value
+          || /^https?:\/\/\S+$/i.test(value)
+          || (/^\/(?!\/)[A-Za-z0-9_./-]+\.svg$/.test(value) && !value.includes('..')),
+        message: 'La imagen debe ser una URL válida o una ruta local a un SVG',
       },
     },
     stats: { type: statsSchema, default: () => ({}) },

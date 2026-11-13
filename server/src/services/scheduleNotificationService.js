@@ -5,9 +5,10 @@ import 'dayjs/locale/es.js'
 import { Match } from '../models/Match.js'
 import { Referee } from '../models/Referee.js'
 import { Team } from '../models/Team.js'
+import { Court } from '../models/Court.js'
 import { League } from '../models/League.js'
 import { NotificationLog } from '../models/NotificationLog.js'
-import { sendRefereeTemplateWithButtons, sendAlertaArbitro } from './whatsappCloudService.js'
+import { sendMatchTemplate, sendRefereeTemplateWithButtons, sendAlertaArbitro } from './whatsappCloudService.js'
 
 dayjs.extend(utc)
 dayjs.extend(timezone)
@@ -31,15 +32,20 @@ export const OFFICIAL_SCHEDULE_TABLE = {
 }
 
 export const isTestMode = () => process.env.TEST_MODE === 'true'
+const weekdays = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado']
+export const isRefereeNoticeTime = (league, now = new Date()) => (
+  league?.avisoPartidosDia === weekdays[now.getDay()]
+  && league?.avisoPartidosHora === `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+)
 
 /**
  * Factor de tiempo:
  * En TEST_MODE=true: 1 hora real = 1 minuto (factor 1/60)
- * 8 horas = 8 minutos (480,000 ms)
+ * Seis minutos en pruebas y seis horas en producción.
  */
 export const getTimeFactor = () => (isTestMode() ? 1 / 60 : 1)
 export const getRefereeConfirmationTimeoutMs = () => {
-  return isTestMode() ? 8 * 60 * 1000 : 8 * 60 * 60 * 1000
+  return isTestMode() ? 6 * 60 * 1000 : 6 * 60 * 60 * 1000
 }
 
 /**
@@ -168,6 +174,11 @@ export const notifyReferee = async (match, options = {}) => {
     const awayTeam = match.equipoVisitante_id?._id
       ? match.equipoVisitante_id
       : await Team.findById(match.equipoVisitante_id)
+    const court = match.cancha_id?._id
+      ? match.cancha_id
+      : match.cancha_id
+        ? await Court.findById(match.cancha_id)
+        : null
 
     const matchDateFormatted = dayjs(match.fecha).format('dddd, DD [de] MMMM')
     const matchTime = match.hora || '15:00'
@@ -203,15 +214,15 @@ export const notifyReferee = async (match, options = {}) => {
 
     if (!isTestMode()) {
       try {
-        const league = await League.findOne({ slug: match.liga_id }).catch(() => null)
-        await sendRefereeTemplateWithButtons({
+        const league = await League.findOne({ slug: match.liga_id })
+        const sent = await sendRefereeTemplateWithButtons({
           phoneNumber: referee.telefono,
           refereeName: referee.nombre,
           leagueName: league?.nombre || 'Liga',
           jornada: match.jornada || 1,
           fecha: dayjs(match.fecha).format('DD/MM/YYYY'),
           hora: matchTime,
-          cancha: 'Cancha',
+          cancha: court?.nombre || 'Cancha por confirmar',
           equipoLocal: localTeam?.nombre || 'Local',
           equipoVisitante: awayTeam?.nombre || 'Visitante',
           idPartido: match.idPartido,
@@ -220,6 +231,7 @@ export const notifyReferee = async (match, options = {}) => {
         })
         if (log) {
           log.status = 'sent'
+          log.metadata = { ...log.metadata, messageId: sent.messageId }
           await log.save()
         }
       } catch (err) {
@@ -231,11 +243,18 @@ export const notifyReferee = async (match, options = {}) => {
         }
       }
     }
+    if (log?.status === 'failed') return log
 
     // Actualizar timestamps en el partido
     match.referee_notified_at = options.notifiedAt || new Date()
     match.referee_confirmed = false
+    match.referee_confirmed_at = null
     match.confirmado_arbitro = 'pendiente'
+    match.arbitro_estado_confirmacion = 'pendiente'
+    match.arbitro_motivo_rechazo = undefined
+    match.arbitro_motivo_respuesta = undefined
+    match.arbitro_fecha_respuesta = undefined
+    match.requiere_reasignacion = false
     match.admin_notified_at = null
     await match.save()
 
@@ -261,71 +280,78 @@ export const notifyCaptains = async (match, options = {}) => {
     const matchDateFormatted = dayjs(match.fecha).format('dddd, DD [de] MMMM')
     const matchTime = match.hora || '15:00'
     const scheduleInfo = calculateScheduleNoticeTimes(match.fecha)
+    const [league, court] = await Promise.all([
+      League.findOne({ slug: match.liga_id }).select('nombre'),
+      match.cancha_id?._id
+        ? Court.findById(match.cancha_id._id)
+        : match.cancha_id
+          ? Court.findById(match.cancha_id)
+          : null,
+    ])
     const logs = []
 
-    // Notificar Capitán Local
-    if (localTeam) {
-      const localCap = getTeamCaptainInfo(localTeam, 'Local')
-      const localMessage = `Hola ${localCap.name}, tu equipo ${localTeam.nombre} tiene partido programado contra ${awayTeam?.nombre || 'Visitante'} el ${matchDateFormatted} a las ${matchTime}. Confirma tu asistencia.`
+    const notifyCaptain = async (team, opponent, teamRole) => {
+      if (!team) return
 
-      if (isTestMode()) {
-        console.log(`[TEST_MODE] Aviso a Capitán Local (${localCap.name} - Tel: ${localCap.phone || 'N/A'}): "${localMessage}"`)
-      }
-
-      const logLocal = await logNotification({
+      const captain = getTeamCaptainInfo(team, teamRole === 'local' ? 'Local' : 'Visitante')
+      const message = `Hola ${captain.name}, tu equipo ${team.nombre} tiene partido programado contra ${opponent || 'Visitante'} el ${matchDateFormatted} a las ${matchTime}. Confirma tu asistencia respondiendo SI o NO.`
+      const log = await logNotification({
         match_id: match._id,
-        to: localCap.phone || 'sin_telefono',
-        recipient_name: localCap.name,
+        to: captain.phone || 'sin_telefono',
+        recipient_name: captain.name,
         role: 'capitan',
         type: 'schedule_notification',
-        message: localMessage,
+        message,
         status: isTestMode() ? 'simulated' : 'pending',
         metadata: {
           match_id: match._id,
           idPartido: match.idPartido,
           match_date: match.fecha,
           match_time: matchTime,
-          team_name: localTeam.nombre,
-          team_role: 'local',
+          team_name: team.nombre,
+          team_role: teamRole,
           match_day: scheduleInfo.matchDayName,
           schedule_rule: scheduleInfo.captainsScheduleDescription,
           league_id: match.liga_id,
         },
       })
-      if (logLocal) logs.push(logLocal)
-    }
-
-    // Notificar Capitán Visitante
-    if (awayTeam) {
-      const awayCap = getTeamCaptainInfo(awayTeam, 'Visitante')
-      const awayMessage = `Hola ${awayCap.name}, tu equipo ${awayTeam.nombre} tiene partido programado contra ${localTeam?.nombre || 'Local'} el ${matchDateFormatted} a las ${matchTime}. Confirma tu asistencia.`
+      if (log) logs.push(log)
 
       if (isTestMode()) {
-        console.log(`[TEST_MODE] Aviso a Capitán Visitante (${awayCap.name} - Tel: ${awayCap.phone || 'N/A'}): "${awayMessage}"`)
+        console.log(`[TEST_MODE] Aviso a Capitán ${teamRole} (${captain.name} - Tel: ${captain.phone || 'N/A'}): "${message}"`)
+        return
       }
 
-      const logAway = await logNotification({
-        match_id: match._id,
-        to: awayCap.phone || 'sin_telefono',
-        recipient_name: awayCap.name,
-        role: 'capitan',
-        type: 'schedule_notification',
-        message: awayMessage,
-        status: isTestMode() ? 'simulated' : 'pending',
-        metadata: {
-          match_id: match._id,
-          idPartido: match.idPartido,
-          match_date: match.fecha,
-          match_time: matchTime,
-          team_name: awayTeam.nombre,
-          team_role: 'visitante',
-          match_day: scheduleInfo.matchDayName,
-          schedule_rule: scheduleInfo.captainsScheduleDescription,
-          league_id: match.liga_id,
-        },
-      })
-      if (logAway) logs.push(logAway)
+      try {
+        const sent = await sendMatchTemplate({
+          phoneNumber: captain.phone,
+          recipientName: captain.name,
+          localTeam: localTeam?.nombre || 'Equipo local',
+          visitorTeam: awayTeam?.nombre || 'Equipo visitante',
+          date: matchDateFormatted,
+          time: matchTime,
+          court: court?.nombre || 'Cancha por confirmar',
+          leagueName: league?.nombre || 'Liga',
+          jornada: match.jornada || 1,
+          templateName: 'aviso_partido_jornada',
+        })
+        if (log) {
+          log.status = 'sent'
+          log.metadata = { ...log.metadata, messageId: sent.messageId }
+          await log.save()
+        }
+      } catch (error) {
+        console.error(`[WhatsApp] Error enviando aviso al capitán ${teamRole}:`, error.message)
+        if (log) {
+          log.status = 'failed'
+          log.error_message = error.message
+          await log.save()
+        }
+      }
     }
+
+    await notifyCaptain(localTeam, awayTeam?.nombre, 'local')
+    await notifyCaptain(awayTeam, localTeam?.nombre, 'visitante')
 
     match.captains_notified_at = options.notifiedAt || new Date()
     await match.save()
@@ -337,102 +363,88 @@ export const notifyCaptains = async (match, options = {}) => {
   }
 }
 
-/**
- * Notifica tanto al árbitro como a los capitanes de un partido
- */
 export const notifyMatchSchedule = async (match, options = {}) => {
   const refLog = await notifyReferee(match, options)
-  const capLogs = await notifyCaptains(match, options)
-  return [refLog, ...capLogs].filter(Boolean)
+  return [refLog].filter(Boolean)
 }
 
 /**
- * Requisito 1: Si el árbitro no confirma en 8 horas (u 8 minutos en TEST_MODE), notifica al admin
+ * Notifica al administrador cuando el árbitro no responde dentro del plazo.
  */
 export const checkRefereeConfirmations = async () => {
   try {
     const timeoutMs = getRefereeConfirmationTimeoutMs()
     const cutoffTime = new Date(Date.now() - timeoutMs)
 
-    // Buscar partidos donde se notificó al árbitro, no ha confirmado y aún no se alerta al admin
+    // Include expired responses again when a previous alert attempt failed.
     const pendingMatches = await Match.find({
       estado: 'programado',
-      referee_notified_at: { $lte: cutoffTime, $ne: null },
-      referee_confirmed: { $ne: true },
       admin_notified_at: null,
+      $or: [
+        {
+          referee_notified_at: { $lte: cutoffTime, $ne: null },
+          referee_confirmed: { $ne: true },
+          arbitro_estado_confirmacion: { $in: ['pendiente', 'sin_respuesta'] },
+        },
+        { arbitro_estado_confirmacion: 'rechazado' },
+      ],
     })
       .populate('arbitro_id')
       .populate('equipoLocal_id')
       .populate('equipoVisitante_id')
+      .populate('cancha_id')
 
     const generatedAlerts = []
 
     for (const match of pendingMatches) {
       if (match.confirmado_arbitro === 'confirmado') {
         match.referee_confirmed = true
+        match.arbitro_estado_confirmacion = 'confirmado'
+        match.arbitro_motivo_respuesta ||= 'Confirmó asistencia: Sí puedo asistir'
         await match.save()
         continue
       }
 
-      const refereeName = match.arbitro_id?.nombre || 'No asignado'
-      const localName = match.equipoLocal_id?.nombre || 'Local'
-      const visitorName = match.equipoVisitante_id?.nombre || 'Visitante'
-      const matchDateStr = dayjs(match.fecha).format('DD/MM/YYYY')
-      const matchTime = match.hora || '15:00'
-      const elapsedLabel = isTestMode() ? '8 minutos (modo prueba)' : '8 horas'
-
-      // Obtener datos del admin / dueño de la liga
-      const league = await League.findOne({
-        $or: [{ slug: match.liga_id }, { _id: match.liga_id }],
-      }).catch(() => null)
-      const adminPhone = league?.dueno?.contacto || process.env.WHATSAPP_SCHEDULED_TEST_PHONE || 'admin'
-      const adminName = league?.dueno?.nombre || 'Administrador'
-
-      const adminAlertMessage = `[ALERTA ADMIN] El árbitro ${refereeName} no ha confirmado el partido ${match.idPartido} (${localName} vs ${visitorName}) programado para el ${matchDateStr} a las ${matchTime}. Han transcurrido ${elapsedLabel} sin confirmación. Por favor reasigna o contacta al árbitro.`
-
-      if (isTestMode()) {
-        console.log(`[TEST_MODE] ${adminAlertMessage}`)
-      }
-
-      const alertLog = await logNotification({
-        match_id: match._id,
-        to: adminPhone,
-        recipient_name: adminName,
-        role: 'admin',
-        type: 'admin_alert',
-        message: adminAlertMessage,
-        status: isTestMode() ? 'simulated' : 'pending',
-        metadata: {
+      try {
+        const league = await League.findOne({ slug: match.liga_id })
+        const reason = match.arbitro_motivo_respuesta
+          || (isTestMode() ? 'Sin confirmación dentro del plazo de 6 minutos' : 'Sin confirmación dentro del plazo de 6 horas')
+        const existingAlert = await NotificationLog.findOne({
           match_id: match._id,
-          idPartido: match.idPartido,
-          match_date: match.fecha,
-          match_time: matchTime,
-          referee_name: refereeName,
-          referee_phone: match.arbitro_id?.telefono,
-          league_id: match.liga_id,
-          timeout_elapsed_ms: timeoutMs,
-        },
-      })
+          role: 'admin',
+          type: { $in: ['admin_alert', 'referee_rejection'] },
+          status: 'sent',
+        }).sort({ sent_at: -1, created_at: -1 })
 
-      if (!isTestMode()) {
-        // En producción enviar notificación por WhatsApp o email al admin
-        console.log(`[PROD ALERT] Alerta enviada a admin ${adminPhone}: ${adminAlertMessage}`)
-        if (alertLog) {
-          alertLog.status = 'sent'
-          await alertLog.save()
+        if (existingAlert) {
+          match.admin_notified_at = existingAlert.sent_at || existingAlert.created_at || new Date()
+          await match.save()
+          generatedAlerts.push({ matchId: match._id, idPartido: match.idPartido, motivo: reason })
+          continue
         }
+
+        if (match.arbitro_estado_confirmacion === 'pendiente') {
+          match.arbitro_estado_confirmacion = 'sin_respuesta'
+          match.confirmado_arbitro = 'rechazado'
+          match.arbitro_fecha_respuesta = new Date()
+          match.arbitro_motivo_respuesta = reason
+          match.arbitro_motivo_rechazo = reason
+          match.requiere_reasignacion = true
+          await match.save()
+        }
+
+        await sendAlertaArbitro(match, {
+          motivo: reason,
+          adminPhone: league?.dueno?.contacto,
+          adminName: league?.dueno?.nombre,
+        })
+
+        match.admin_notified_at = new Date()
+        await match.save()
+        generatedAlerts.push({ matchId: match._id, idPartido: match.idPartido, motivo: reason })
+      } catch (error) {
+        console.error(`[Schedule] No se pudo enviar la alerta del partido ${match.idPartido}:`, error.message)
       }
-
-      match.admin_notified_at = new Date()
-      match.arbitro_estado_confirmacion = 'sin_respuesta'
-      match.confirmado_arbitro = 'rechazado'
-      match.arbitro_fecha_respuesta = new Date()
-      match.requiere_reasignacion = true
-      await match.save()
-
-      await sendAlertaArbitro(match, { motivo: 'Sin respuesta del árbitro en el tiempo límite' })
-
-      if (alertLog) generatedAlerts.push(alertLog)
     }
 
     return generatedAlerts
@@ -477,6 +489,11 @@ export const confirmRefereeAssignment = async (id) => {
   match.referee_confirmed = true
   match.confirmado_arbitro = 'confirmado'
   match.referee_confirmed_at = new Date()
+  match.arbitro_estado_confirmacion = 'confirmado'
+  match.arbitro_motivo_respuesta = 'Confirmó asistencia: Sí puedo asistir'
+  match.arbitro_motivo_rechazo = undefined
+  match.arbitro_fecha_respuesta = match.referee_confirmed_at
+  match.requiere_reasignacion = false
   await match.save()
 
   if (isTestMode()) {
@@ -511,33 +528,28 @@ export const processScheduledNotifications = async () => {
   try {
     const now = dayjs()
     const upcomingRange = now.add(14, 'day').toDate()
-
-    const matches = await Match.find({
+    const leagues = await League.find({
+      avisoPartidosDia: weekdays[now.day()],
+      avisoPartidosHora: now.format('HH:mm'),
+    }).select('slug')
+    const dueLeagueSlugs = leagues.map((league) => league.slug)
+    const matches = dueLeagueSlugs.length ? await Match.find({
+      liga_id: { $in: dueLeagueSlugs },
       estado: 'programado',
-      fecha: { $gte: now.startOf('day').subtract(1, 'day').toDate(), $lte: upcomingRange },
+      fecha: { $gte: now.toDate(), $lte: upcomingRange },
+      referee_notified_at: null,
     })
       .populate('arbitro_id')
       .populate('equipoLocal_id')
       .populate('equipoVisitante_id')
+      .populate('cancha_id') : []
 
     let notifiedReferees = 0
-    let notifiedCaptains = 0
 
     for (const match of matches) {
-      if (!match.fecha) continue
-      const { refereeNoticeDate, captainsNoticeDate } = calculateScheduleNoticeTimes(match.fecha)
-
-      // Verificar si corresponde avisar al árbitro
-      if (!match.referee_notified_at && (now.isAfter(refereeNoticeDate) || now.isSame(refereeNoticeDate, 'minute'))) {
-        await notifyReferee(match)
-        notifiedReferees++
-      }
-
-      // Verificar si corresponde avisar a capitanes
-      if (!match.captains_notified_at && (now.isAfter(captainsNoticeDate) || now.isSame(captainsNoticeDate, 'minute'))) {
-        await notifyCaptains(match)
-        notifiedCaptains++
-      }
+      if (!match.fecha || !match.arbitro_id) continue
+      const notification = await notifyReferee(match)
+      if (notification && notification.status !== 'failed') notifiedReferees++
     }
 
     // Verificar árbitros que no han confirmado dentro del lapso
@@ -546,7 +558,7 @@ export const processScheduledNotifications = async () => {
     return {
       evaluatedMatches: matches.length,
       notifiedReferees,
-      notifiedCaptains,
+      notifiedCaptains: 0,
       alertsGenerated: alerts.length,
     }
   } catch (error) {
