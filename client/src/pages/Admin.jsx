@@ -3,7 +3,7 @@ import { Button, Modal } from 'react-bootstrap'
 import { useAdminAuth } from '../components/AdminAuthContext'
 import LeagueHeader from '../components/LeagueHeader'
 import FloatingNotifications from '../components/FloatingNotifications'
-import { createLeague, getLeagueAdminContact, getLeagues, resetLeagueAdminPasswordBySuperAdmin, updateLeague } from '../services/leagueApi'
+import { createLeague, getLeagueAdminContact, getLeagues, getWhatsAppFlowTest, resetLeagueAdminPasswordBySuperAdmin, startWhatsAppFlowTest, updateLeague } from '../services/leagueApi'
 import '../index.css'
 
 const initialLeagueForm = {
@@ -36,6 +36,9 @@ const Admin = () => {
   const [resetAdminPassword, setResetAdminPassword] = useState('')
   const [showResetAdminPassword, setShowResetAdminPassword] = useState(false)
   const [resetStatus, setResetStatus] = useState({ type: '', message: '' })
+  const [whatsAppFlow, setWhatsAppFlow] = useState(null)
+  const [startingWhatsAppFlow, setStartingWhatsAppFlow] = useState(false)
+  const [pollWhatsAppFlow, setPollWhatsAppFlow] = useState(false)
 
   const loadLeagues = async () => {
     try {
@@ -58,6 +61,61 @@ const Admin = () => {
       })
     return () => { active = false }
   }, [])
+
+  useEffect(() => {
+    if (!pollWhatsAppFlow) return undefined
+
+    let checking = false
+    const interval = setInterval(async () => {
+      if (checking) return
+      checking = true
+      try {
+        const { flow } = await getWhatsAppFlowTest()
+        if (!flow) return
+        setWhatsAppFlow(flow)
+        if (['completed', 'failed'].includes(flow.workflowState)) setPollWhatsAppFlow(false)
+      } catch (error) {
+        setStatus({ type: 'error', message: error.response?.data?.message || 'No se pudo consultar el estado de la prueba.' })
+        setPollWhatsAppFlow(false)
+      } finally {
+        checking = false
+      }
+    }, 5000)
+
+    return () => clearInterval(interval)
+  }, [pollWhatsAppFlow])
+
+  const handleWhatsAppFlowTest = async () => {
+    setStartingWhatsAppFlow(true)
+    setStatus({ type: '', message: '' })
+    try {
+      const flow = await startWhatsAppFlowTest()
+      setWhatsAppFlow(flow)
+      setPollWhatsAppFlow(true)
+    } catch (error) {
+      if (error.response?.data?.flow) {
+        setWhatsAppFlow(error.response.data.flow)
+        setPollWhatsAppFlow(true)
+      }
+      setStatus({ type: 'error', message: error.response?.data?.message || 'No se pudo iniciar el flujo de WhatsApp.' })
+    } finally {
+      setStartingWhatsAppFlow(false)
+    }
+  }
+
+  const whatsAppFlowStatus = !whatsAppFlow
+    ? ''
+    : whatsAppFlow.workflowState === 'waiting_response'
+      ? 'Flujo iniciado → Esperando 6 min'
+      : whatsAppFlow.workflowState === 'processing'
+        ? 'Procesando mensajes finales...'
+        : whatsAppFlow.workflowState === 'retry'
+          ? 'Reintentando envío...'
+          : whatsAppFlow.workflowState === 'completed'
+            ? `Terminado${whatsAppFlow.response === 'yes' ? ' · respondió SÍ' : whatsAppFlow.response === 'no' ? ' · respondió NO' : ' · sin respuesta SÍ/NO'}`
+            : whatsAppFlow.workflowState === 'failed'
+              ? `Falló: ${whatsAppFlow.lastError || 'no se pudo completar el envío'}`
+              : ''
 
   const updateLeagueField = (field, value) => setLeagueForm((current) => ({ ...current, [field]: value }))
   const updateEditLeagueField = (field, value) => setEditLeagueForm((current) => ({ ...current, [field]: value }))
@@ -179,6 +237,20 @@ const Admin = () => {
           <div><p className="admin-eyebrow">Panel privado</p><h1 className="admin-title">Administración</h1><p className="admin-description">Gestiona los datos generales de tus ligas.</p></div>
           <button className="admin-primary-button" type="button" onClick={() => setShowLeagueForm((current) => !current)}>{showLeagueForm ? 'Cerrar formulario' : '+ Crear nueva liga'}</button>
         </div>
+
+        <section className="form-section" aria-labelledby="whatsapp-flow-test-title">
+          <h2 id="whatsapp-flow-test-title">Prueba de WhatsApp</h2>
+          <p>Envía mensajes reales al número de prueba y registra la respuesta durante 6 minutos.</p>
+          <button
+            className="admin-secondary-button"
+            type="button"
+            onClick={handleWhatsAppFlowTest}
+            disabled={startingWhatsAppFlow || pollWhatsAppFlow}
+          >
+            {startingWhatsAppFlow ? 'Enviando...' : 'PROBAR FLUJO COMPLETO (6 MIN) - 4494481016'}
+          </button>
+          {whatsAppFlowStatus && <p role="status" aria-live="polite">{whatsAppFlowStatus}</p>}
+        </section>
 
         {showLeagueForm && <form className="league-form" onSubmit={handleLeagueSubmit}>
           <div className="form-section"><h2>Nueva liga</h2><div className="form-grid">

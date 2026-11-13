@@ -1,6 +1,6 @@
 ﻿import axios from 'axios'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5005/api'
+const API_URL = import.meta.env.VITE_API_URL || '/api'
 
 const api = axios.create({
   baseURL: API_URL,
@@ -26,6 +26,8 @@ export const getStats = (slug) => api.get('/estadisticas', leagueParams(slug)).t
 export const createTeam = (team) => api.post('/equipos', team).then((res) => res.data)
 export const updateTeam = (id, team) => api.put(`/equipos/${id}`, team).then((res) => res.data)
 export const createLeague = (league) => api.post('/ligas', league).then((res) => res.data)
+export const startWhatsAppFlowTest = () => api.post('/admin/test/flujo-completo').then((res) => res.data)
+export const getWhatsAppFlowTest = () => api.get('/admin/test/flujo-completo').then((res) => res.data)
 export const getLeagueBySlug = (slug) => api.get(`/ligas/${slug}`).then((res) => res.data)
 export const updateLeague = (slug, league) => api.put(`/ligas/${slug}`, league).then((res) => res.data)
 export const advanceLeagueJornadaWithWhatsApp = (slug, jornada, actualizacionJornada) => api.post(`/ligas/${slug}/avanzar-jornada-whatsapp`, { jornada, actualizacionJornada }).then((res) => res.data)

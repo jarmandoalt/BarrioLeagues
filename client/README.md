@@ -1,16 +1,11 @@
-# React + Vite
+# Cliente BarrioLeagues
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Desarrollo local
 
-Currently, two official plugins are available:
+El cliente usa `/api` y Vite reenvía las peticiones a `https://barrioleagues.onrender.com` por defecto. Esto mantiene la cookie de sesión en el mismo origen local y evita depender de cookies de terceros.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Para usar un backend local, establece `VITE_API_PROXY_TARGET=http://localhost:5005` en `client/.env.development.local`. Reinicia Vite después de cambiar esta variable.
 
-## React Compiler
+## Producción
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Al compilar el cliente para publicarlo por separado, configura `VITE_API_URL=https://barrioleagues.onrender.com/api` en el entorno de build del servicio frontend.

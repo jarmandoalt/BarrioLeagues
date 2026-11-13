@@ -4,7 +4,6 @@ import { normalizeWhatsAppPhone, sendMatchTemplate } from './whatsappCloudServic
 
 const weekdays = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado']
 const leagueSlug = 'las-huertas'
-const checkIntervalMs = 10_000
 let isChecking = false
 
 export const getDueScheduleDate = (league, now = new Date()) => {
@@ -54,7 +53,7 @@ const sendScheduledMessages = async (league, recipientPhone) => {
   }
 }
 
-const checkScheduledTest = async () => {
+export const runScheduledWhatsAppTest = async () => {
   if (isChecking) return
   isChecking = true
 
@@ -90,16 +89,4 @@ const checkScheduledTest = async () => {
   } finally {
     isChecking = false
   }
-}
-
-export const startScheduledWhatsAppTest = () => {
-  const recipientPhone = normalizeWhatsAppPhone(process.env.WHATSAPP_SCHEDULED_TEST_PHONE)
-  if (!/^\d{8,15}$/.test(recipientPhone)) {
-    console.warn('Aviso programado de prueba inactivo: configura WHATSAPP_SCHEDULED_TEST_PHONE.')
-    return
-  }
-
-  void checkScheduledTest()
-  const interval = setInterval(checkScheduledTest, checkIntervalMs)
-  interval.unref()
 }

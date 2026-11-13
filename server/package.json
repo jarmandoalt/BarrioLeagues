@@ -7,7 +7,8 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "admin:setup": "node src/scripts/setupAdmin.js",
-    "test:matches": "node src/scripts/createTestMatches.js"
+    "test:matches": "node src/scripts/createTestMatches.js",
+    "cron:run": "node src/scripts/runRenderCron.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -19,7 +20,6 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^8.7.4",
-    "node-cron": "^4.6.0"
+    "mongoose": "^8.7.4"
   }
 }

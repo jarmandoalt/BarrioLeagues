@@ -17,12 +17,11 @@ Este documento explica cómo usar el nuevo sistema de notificaciones de horarios
 ## 🔧 Instalación
 
 Las dependencias necesarias ya están instaladas:
-- `node-cron` - Para ejecutar tareas programadas
 - `dayjs` - Para manejo de fechas
 
 Si necesitas reinstalarlas:
 ```bash
-npm install node-cron dayjs
+npm install dayjs
 ```
 
 ## ⚙️ Configuración
@@ -42,10 +41,10 @@ Los partidos anteriores sin marcador permanecen en estado `programado` (mostrado
    - `WHATSAPP_PHONE_NUMBER_ID`
    - `WHATSAPP_APP_SECRET`
    - `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
-4. En Meta Developers, configura el callback público como `https://<dominio>/api/webhook/button-response`, usa el mismo valor de `WHATSAPP_WEBHOOK_VERIFY_TOKEN` y suscribe la aplicación al campo `messages`.
-5. Si el servidor está detrás de un proxy o túnel, apunta el callback al puerto local `5006` con `node src/scripts/whatsappWebhookGateway.js`; ese gateway solo expone la ruta del webhook y reenvía al API en el puerto `5005`.
+4. En Meta Developers, configura el callback público como `https://<dominio>/webhook`, usa el mismo valor de `WHATSAPP_WEBHOOK_VERIFY_TOKEN` y suscribe la aplicación al campo `messages`.
+5. En Render, configura el servicio Cron Job `barrioleagues-scheduler` con `npm run cron:run` y el schedule `* * * * *`; debe usar el mismo `MONGO_URI` de Atlas y las credenciales de WhatsApp que necesite el scheduler.
 
-El sistema ejecutará automáticamente a las **8:00 AM** cada día.
+El Cron Job de Render revisa cada minuto si hay avisos con fecha y hora vencidas, y procesa las respuestas pendientes del flujo completo de prueba. Esto funciona aunque el Web Service se duerma.
 
 Los árbitros pueden confirmar o rechazar con los botones de su plantilla, o responder por texto. Los capitanes pueden responder por texto con `SI` o `NO`; si tienen más de un partido pendiente, deben incluir el rol y el ID de seis dígitos, por ejemplo `CAPITAN SI 123456` o `ARBITRO NO 123456`. Las respuestas se guardan en `notifications_log`.
 
@@ -61,12 +60,14 @@ TEST_MODE=true
 npm run dev
 ```
 
-**En modo pruebas:**
+**En modo pruebas para las notificaciones programadas:**
 - 1 hora real = 1 minuto en pruebas
-- El cron ejecuta cada 1 minuto (en lugar de a las 8:00 AM)
+- El Cron Job de Render se ejecuta cada 1 minuto
 - 8 horas de confirmación del árbitro = 8 minutos
 - Las notificaciones programadas no se envían realmente; solo se registran en consola y BD
 - Para recibir respuestas reales, Meta debe tener configurado el webhook público y el servidor debe seguir accesible desde internet
+
+El botón **PROBAR FLUJO COMPLETO (6 MIN)** del panel administrativo sí envía mensajes reales al número fijo de prueba `524494481016`, aunque `TEST_MODE=false`. Las ejecuciones y respuestas se guardan en MongoDB con `status: "test"`. El Cron Job puede continuar el flujo hasta aproximadamente un minuto después del plazo de seis minutos.
 
 ## 🧪 Pruebas - Endpoints Disponibles
 
@@ -319,14 +320,15 @@ Contiene todos los logs de notificaciones:
 El sistema ejecuta automáticamente:
 
 **En Producción:**
-- Cada día a las **8:00 AM**
-- Verifica partidos programados del día
-- Envía notificaciones reales por WhatsApp
+- El Cron Job separado de Render se ejecuta cada minuto.
+- Evalúa los avisos programados y procesa los flujos de prueba que hayan cumplido su plazo.
+- La hora de envío se determina por la configuración de cada liga.
 
 **En Modo Pruebas:**
 - Cada **1 minuto**
 - Verifica partidos de los próximos 7 días
-- Simula notificaciones (console.log + logs en BD)
+- Las notificaciones programadas pueden quedar simuladas según `TEST_MODE`.
+- El flujo del botón de prueba es independiente y envía mensajes reales al número fijo de prueba.
 
 ## 🎯 Características
 
@@ -338,7 +340,7 @@ El sistema ejecuta automáticamente:
 
 ✅ **Logs detallados** - Cada notificación se registra en la BD
 
-✅ **Sin WhatsApp real en pruebas** - Solo console.log + logs
+✅ **Pruebas de notificaciones programadas** - Pueden ejecutarse en modo simulado
 
 ✅ **Endpoints de prueba** - Simula jornadas, confirma árbitros, ve logs
 
@@ -353,8 +355,8 @@ El sistema ejecuta automáticamente:
 
 ### El cron no ejecuta
 - Verifica que MongoDB esté conectado
-- Revisa los logs de error en la consola del servidor
-- En producción, verifica que sea después de las 8:00 AM
+- Revisa los logs del servicio `barrioleagues-scheduler` en Render
+- Confirma que el Cron Job use el mismo `MONGO_URI` y las credenciales requeridas
 
 ### Las notificaciones no se envían en producción
 - Verifica credenciales de WhatsApp en `.env`
@@ -362,8 +364,7 @@ El sistema ejecuta automáticamente:
 - Revisa los logs en la tabla `notificationlogs` con `status=failed`
 
 ### No se reciben respuestas de WhatsApp
-- Verifica que Meta Developers apunte a `/api/webhook/button-response`, que el callback se haya verificado y que esté suscrito a `messages`
-- Mantén activo el servidor y, si usas el gateway, `node src/scripts/whatsappWebhookGateway.js`
+- Verifica que Meta Developers apunte a `/webhook`, que el callback se haya verificado y que esté suscrito a `messages`
 - Comprueba que `WHATSAPP_APP_SECRET` y `WHATSAPP_WEBHOOK_VERIFY_TOKEN` coincidan con la configuración de Meta
 - Para respuestas de capitanes, verifica que el aviso outbound tenga estado `sent` o `delivered` en `notifications_log`
 
@@ -378,9 +379,9 @@ captains_notified_at: Date   // Cuándo se notificó a capitanes
 
 ## 🔒 Seguridad
 
-- Los endpoints de prueba solo funcionan si `TEST_MODE=true`
-- Los logs de prueba se marcan con `test_mode: true` para distinguirlos
-- Las notificaciones reales de WhatsApp no se envían en modo prueba
+- El endpoint del flujo completo requiere una sesión del administrador principal.
+- Los datos del flujo se guardan en MongoDB con `status: "test"` y no modifican partidos reales.
+- El flujo de prueba sí envía mensajes reales al número fijo `524494481016`; confirma las credenciales y la configuración de Meta antes de usarlo.
 
 ## 📞 Soporte
 

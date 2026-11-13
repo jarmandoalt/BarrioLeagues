@@ -1,21 +1,14 @@
 import mongoose from 'mongoose'
-import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { verifyWhatsAppWebhookSignature } from '../services/whatsappWebhookSecurity.js'
 import { League } from '../models/League.js'
 import { Match } from '../models/Match.js'
-import { getMissingWhatsAppApiConfig, normalizeWhatsAppPhone, sendAlertaArbitro, sendMatchTemplate, sendRefereeTemplateWithButtons, sendWhatsAppText } from '../services/whatsappCloudService.js'
-import { getWhatsAppButtonReply, getWhatsAppTextReply, getWhatsAppTrialButtonResponse } from '../services/whatsappWebhookPayload.js'
+import { getMissingWhatsAppApiConfig, normalizeWhatsAppPhone, sendAlertaArbitro, sendWhatsAppText } from '../services/whatsappCloudService.js'
+import { getWhatsAppButtonReply, getWhatsAppTextReply } from '../services/whatsappWebhookPayload.js'
 import { NotificationLog } from '../models/NotificationLog.js'
 import { getRefereeConfirmationTimeoutMs, notifyReferee } from '../services/scheduleNotificationService.js'
 
 export const whatsappRoutes = Router()
-
-const activeWhatsAppTrials = new Map()
-const trialPhone = normalizeWhatsAppPhone('4494481016')
-const refereeTimeoutMs = 6 * 60 * 1000
-const captainMessageDelayMs = 18 * 60 * 1000
-const isLocalRequest = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)
 
 const findPendingTextReplyCandidates = async (senderPhone, reply) => {
   const candidates = []
@@ -120,170 +113,6 @@ const updateWhatsAppDeliveryStatus = async (statusUpdate) => {
   }
 }
 
-const finishWhatsAppTrial = async (trial, response) => {
-  if (trial.state !== 'awaiting_response') return false
-  if (response === 'timeout' ? Date.now() < trial.expiresAt : Date.now() >= trial.expiresAt) return false
-  clearTimeout(trial.timeout)
-  trial.state = response
-
-  if (response === 'yes') {
-    trial.timeout = setTimeout(async () => {
-      try {
-        const result = await sendMatchTemplate({
-          phoneNumber: trialPhone,
-          recipientName: trial.captainName,
-          localTeam: trial.localTeam,
-          visitorTeam: trial.visitorTeam,
-          date: trial.date,
-          time: trial.time,
-          court: trial.court,
-          leagueName: trial.leagueName,
-          jornada: trial.jornada,
-          templateName: 'aviso_partido_jornada',
-        })
-        console.log(`[WhatsApp Trial] Mensaje de confirmación al capitán aceptado: ${result.status}`)
-        trial.state = 'awaiting_captain_response'
-        trial.expiresAt = Date.now() + 24 * 60 * 60 * 1000
-        trial.timeout = setTimeout(() => {
-          activeWhatsAppTrials.delete(trial.id)
-          console.log('[WhatsApp Trial] Venció el plazo de respuesta del capitán.')
-        }, 24 * 60 * 60 * 1000)
-      } catch (error) {
-        console.error('[WhatsApp Trial] No se pudo enviar la confirmación al capitán:', error.message)
-        activeWhatsAppTrials.delete(trial.id)
-      }
-    }, Math.max(0, trial.captainSendAt - Date.now()))
-    return true
-  }
-
-  try {
-    const result = await sendAlertaArbitro(trial.match, {
-      motivo: response === 'no' ? 'No puedo asistir' : 'No respondió en 6 minutos',
-      adminPhone: trialPhone,
-      adminName: trial.adminName,
-      sendWhatsApp: true,
-      recordLog: false,
-    })
-    console.log(`[WhatsApp Trial] Alerta al administrador aceptada: ${result.status}`)
-  } catch (error) {
-    console.error('[WhatsApp Trial] No se pudo enviar la alerta al administrador:', error.message)
-  } finally {
-    activeWhatsAppTrials.delete(trial.id)
-  }
-  return true
-}
-
-whatsappRoutes.post('/test/whatsapp-trial', async (req, res) => {
-  if (process.env.TEST_MODE !== 'true' || !isLocalRequest(req)) {
-    return res.status(404).json({ message: 'Ruta no disponible' })
-  }
-  if (activeWhatsAppTrials.size) {
-    return res.status(409).json({ message: 'Ya hay una prueba temporal en curso' })
-  }
-
-  const missingConfig = getMissingWhatsAppApiConfig()
-  if (missingConfig.length) {
-    return res.status(503).json({ message: `Falta configurar la API de WhatsApp: ${missingConfig.join(', ')}` })
-  }
-
-  const { idPartido, liga } = req.body
-  if (!/^\d{6}$/.test(String(idPartido || ''))) {
-    return res.status(400).json({ message: 'Indica el ID de seis dígitos del partido de prueba' })
-  }
-  if (liga !== undefined && (typeof liga !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/i.test(liga))) {
-    return res.status(400).json({ message: 'La liga indicada no es válida' })
-  }
-
-  try {
-    const matchQuery = { idPartido, estado: 'programado' }
-    if (liga) {
-      matchQuery.liga_id = liga.toLowerCase()
-    } else {
-      const candidates = await Match.find(matchQuery).select('_id').limit(2).lean()
-      if (candidates.length > 1) {
-        return res.status(409).json({ message: 'El ID existe en varias ligas; indica también la liga para evitar probar el partido equivocado' })
-      }
-    }
-
-    const match = await Match.findOne(matchQuery)
-      .populate('arbitro_id', 'nombre telefono')
-      .populate('equipoLocal_id', 'nombre dt')
-      .populate('equipoVisitante_id', 'nombre')
-      .populate('cancha_id', 'nombre')
-    if (!match || !match.arbitro_id) {
-      return res.status(404).json({ message: 'No se encontró un partido programado con árbitro asignado' })
-    }
-
-    const league = await League.findOne({ slug: match.liga_id }).select('nombre dueno')
-    const id = `trial-${randomUUID()}`
-    const trial = {
-      id,
-      state: 'awaiting_response',
-      expiresAt: 0,
-      captainSendAt: 0,
-      match,
-      leagueSlug: match.liga_id,
-      localTeam: match.equipoLocal_id?.nombre || 'Equipo local',
-      visitorTeam: match.equipoVisitante_id?.nombre || 'Equipo visitante',
-      captainName: match.equipoLocal_id?.dt?.nombre || `Capitán de ${match.equipoLocal_id?.nombre || 'equipo local'}`,
-      refereeName: match.arbitro_id.nombre,
-      adminName: league?.dueno?.nombre || 'Admin de prueba',
-      court: match.cancha_id?.nombre || 'Cancha por confirmar',
-      leagueName: league?.nombre || 'Liga',
-      jornada: match.jornada,
-      date: match.fecha
-        ? new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'long', timeZone: 'UTC' }).format(match.fecha)
-        : 'fecha por confirmar',
-      time: match.hora || 'hora por confirmar',
-    }
-    activeWhatsAppTrials.set(id, trial)
-
-    try {
-      const sent = await sendRefereeTemplateWithButtons({
-        phoneNumber: trialPhone,
-        refereeName: match.arbitro_id.nombre,
-        leagueName: league?.nombre || 'Liga',
-        jornada: match.jornada,
-        fecha: match.fecha
-          ? new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(match.fecha)
-          : 'Por confirmar',
-        hora: match.hora || 'Por confirmar',
-        cancha: match.cancha_id?.nombre || 'Cancha por confirmar',
-        equipoLocal: trial.localTeam,
-        equipoVisitante: trial.visitorTeam,
-        idPartido: match.idPartido,
-        adminName: league?.dueno?.nombre || 'Admin',
-        matchId: id,
-      })
-
-      const sentAt = Date.now()
-      trial.expiresAt = sentAt + refereeTimeoutMs
-      trial.captainSendAt = sentAt + captainMessageDelayMs
-      trial.timeout = setTimeout(() => {
-        if (trial.state === 'awaiting_response') {
-          void finishWhatsAppTrial(trial, 'timeout')
-        }
-      }, refereeTimeoutMs)
-
-      return res.json({
-        success: true,
-        message: 'Mensaje de prueba enviado; se esperan respuestas durante 6 minutos. Si confirma, el aviso al capitán se enviará a los 18 minutos totales desde el aviso inicial al árbitro.',
-        idPartido: match.idPartido,
-        fixture: `${trial.localTeam} vs ${trial.visitorTeam}`,
-        refereeMessageId: sent.messageId,
-        storage: 'sin cambios en MongoDB; respuesta en memoria temporal',
-      })
-    } catch (error) {
-      clearTimeout(trial.timeout)
-      activeWhatsAppTrials.delete(id)
-      throw error
-    }
-  } catch (error) {
-    console.error('[WhatsApp Trial] No se pudo iniciar la prueba:', error.message)
-    return res.status(502).json({ message: 'No se pudo enviar el mensaje de prueba', error: error.message })
-  }
-})
-
 whatsappRoutes.post('/ligas/:slug/avanzar-jornada-whatsapp', async (req, res) => {
   if (mongoose.connection.readyState !== 1) {
     return res.status(503).json({ message: 'MongoDB no está conectado' })
@@ -377,12 +206,11 @@ whatsappRoutes.get('/webhook/button-response', (req, res) => {
   return res.type('text/plain').status(200).send(challenge)
 })
 
-whatsappRoutes.post('/webhook/button-response', async (req, res) => {
+export const handleWhatsAppWebhookPost = async (req, res) => {
   try {
-    console.log("PAYLOAD COMPLETO:", JSON.stringify(req.body, null, 2))
     const signature = req.get('x-hub-signature-256')
     if (!signature) {
-      console.log('[WhatsApp Webhook] POST sin firma recibido:', req.body)
+      console.warn('[WhatsApp Webhook] POST sin firma recibido; se ignora.')
       return
     }
 
@@ -411,9 +239,13 @@ whatsappRoutes.post('/webhook/button-response', async (req, res) => {
 
     const messageData = entries
       .flatMap((entry) => entry.changes || [])
-      .flatMap((change) => change.value?.messages || [])[0]
+      .flatMap((change) => change.value?.messages || [])
+      .find((message) => !req.whatsappFlowTestMessageIds?.has(message.id))
 
     if (!messageData) {
+      return
+    }
+    if (req.whatsappFlowTestMessageIds?.has(messageData.id)) {
       return
     }
 
@@ -423,40 +255,7 @@ whatsappRoutes.post('/webhook/button-response', async (req, res) => {
     const textReply = getWhatsAppTextReply(messageData)
     const payload = messageData.type === 'button' ? messageData.button?.payload : buttonReply?.payload
     const buttonText = messageData.type === 'button' ? messageData.button?.text : null
-    const trialButtonResponse = getWhatsAppTrialButtonResponse(messageData)
     let responsePayload = payload
-    const isTrialSender = normalizeWhatsAppPhone(senderPhone) === trialPhone
-    if (activeWhatsAppTrials.size) {
-      console.log(
-        `[WhatsApp Trial] Webhook recibido: tipo=${messageData.type}, botón=${Boolean(buttonReply)}, `
-        + `payloadConfirmación=${String(responsePayload || '').startsWith('confirm_')}, emisorPrueba=${isTrialSender}.`,
-      )
-    }
-
-    if (!responsePayload && trialButtonResponse && isTrialSender) {
-      const pendingTrial = [...activeWhatsAppTrials.values()].find((trial) => trial.state === 'awaiting_response')
-      if (pendingTrial) responsePayload = `confirm_${trialButtonResponse}_${pendingTrial.id}`
-    }
-
-    if (!buttonReply && messageData.type === 'text' && isTrialSender && activeWhatsAppTrials.size > 0) {
-      const pendingTrial = [...activeWhatsAppTrials.values()].find((trial) => trial.state === 'awaiting_response')
-      if (textReply && pendingTrial) {
-        const accepted = await finishWhatsAppTrial(pendingTrial, textReply.response)
-        console.log(`[WhatsApp Trial] Respuesta de texto ${textReply.response} ${accepted ? 'recibida' : 'ignorada'}.`)
-      } else {
-        const pendingCaptainTrial = [...activeWhatsAppTrials.values()]
-          .find((trial) => trial.state === 'awaiting_captain_response')
-        if (textReply && pendingCaptainTrial) {
-          clearTimeout(pendingCaptainTrial.timeout)
-          pendingCaptainTrial.state = `captain_${textReply.response}`
-          activeWhatsAppTrials.delete(pendingCaptainTrial.id)
-          console.log(`[WhatsApp Trial] Respuesta ${textReply.response} del capitán recibida para partido ${pendingCaptainTrial.match.idPartido}.`)
-        } else {
-          console.log('[WhatsApp Trial] Mensaje recibido del número de prueba, pero no coincide con una respuesta válida.')
-        }
-      }
-      return
-    }
 
     if (!responsePayload && textReply) {
       if (messageId && await NotificationLog.exists({ 'metadata.responseMessageId': messageId })) {
@@ -496,21 +295,6 @@ whatsappRoutes.post('/webhook/button-response', async (req, res) => {
     // Parsear payload: "confirm_yes_${matchId}" o "confirm_no_${matchId}"
     const [, response, ...matchIdParts] = responsePayload.split('_')
     const matchIdStr = matchIdParts.join('_')
-    if (matchIdStr.startsWith('trial-')) {
-      if (!['yes', 'no'].includes(response)) return
-      if (!isTrialSender) {
-        console.warn('[WhatsApp Trial] Se ignoró el botón porque el emisor no coincide con el número de prueba.')
-        return
-      }
-      const trial = activeWhatsAppTrials.get(matchIdStr)
-      if (!trial) {
-        console.warn('[WhatsApp Trial] Se recibió una respuesta, pero la prueba asociada ya no está activa.')
-        return
-      }
-      const accepted = await finishWhatsAppTrial(trial, response)
-      console.log(`[WhatsApp Trial] Respuesta del botón ${response} ${accepted ? 'recibida' : 'ignorada'}.`)
-      return
-    }
     if (!['yes', 'no'].includes(response) || !mongoose.isValidObjectId(matchIdStr)) {
       return
     }
@@ -645,4 +429,6 @@ whatsappRoutes.post('/webhook/button-response', async (req, res) => {
   } finally {
     res.sendStatus(200)
   }
-})
+}
+
+whatsappRoutes.post('/webhook/button-response', handleWhatsAppWebhookPost)

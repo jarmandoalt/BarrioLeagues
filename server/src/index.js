@@ -6,6 +6,8 @@ import dotenv from 'dotenv'
 import mongoose from 'mongoose'
 import { Match } from './models/Match.js'
 import { NotificationLog } from './models/NotificationLog.js'
+import { WhatsAppFlowTest } from './models/WhatsAppFlowTest.js'
+import { WhatsAppReceivedMessage } from './models/WhatsAppReceivedMessage.js'
 import { standingsRoutes } from './routes/standingsRoutes.js'
 import { teamsRoutes } from './routes/teamsRoutes.js'
 import { matchesRoutes } from './routes/matchesRoutes.js'
@@ -16,13 +18,13 @@ import { refereesRoutes } from './routes/refereesRoutes.js'
 import { refereePortalRoutes } from './routes/refereePortalRoutes.js'
 import { courtsRoutes } from './routes/courtsRoutes.js'
 import { whatsappRoutes } from './routes/whatsappRoutes.js'
+import { whatsappWebhookRoutes } from './routes/whatsappWebhookRoutes.js'
+import { whatsappFlowTestRoutes } from './routes/whatsappFlowTestRoutes.js'
 import { adminAuthRoutes } from './routes/adminAuthRoutes.js'
 import { testRoutes } from './routes/testRoutes.js'
 import notificationRoutes from './routes/notificationRoutes.js'
 import { requireAdminAuth } from './services/adminAuth.js'
 import { provisionLeagueAdminCredentials } from './services/leagueAdminProvisioning.js'
-import { startScheduledWhatsAppTest } from './services/scheduledWhatsAppTest.js'
-import { startScheduleNotificationCron } from './services/scheduleNotificationCron.js'
 
 dotenv.config()
 
@@ -51,6 +53,7 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, message: 'BarrioLeagues API funcionando' })
 })
 
+app.use(whatsappWebhookRoutes)
 app.use('/api', adminAuthRoutes)
 app.use('/api', (req, res, next) => {
   if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next()
@@ -72,6 +75,7 @@ app.use('/api', refereesRoutes)
 app.use('/api', refereePortalRoutes)
 app.use('/api', courtsRoutes)
 app.use('/api', whatsappRoutes)
+app.use('/api', whatsappFlowTestRoutes)
 app.use('/api', testRoutes)
 app.use('/api', notificationRoutes)
 
@@ -81,6 +85,10 @@ const startServer = async () => {
       await mongoose.connect(process.env.MONGO_URI)
       await provisionLeagueAdminCredentials()
       await Match.createIndexes()
+      await Promise.all([
+        WhatsAppFlowTest.createIndexes(),
+        WhatsAppReceivedMessage.createIndexes(),
+      ])
       const indexes = await Match.collection.indexes()
       const legacyGlobalIdIndex = indexes.find((index) => index.unique && Object.keys(index.key).length === 1 && index.key.idPartido === 1)
       if (legacyGlobalIdIndex) await Match.collection.dropIndex(legacyGlobalIdIndex.name)
@@ -98,8 +106,6 @@ const startServer = async () => {
         }
       }
 
-      startScheduledWhatsAppTest()
-      startScheduleNotificationCron()
       console.log('MongoDB conectado')
     } else {
       console.log('MONGO_URI no configurado. Ejecutando sin base de datos.')
